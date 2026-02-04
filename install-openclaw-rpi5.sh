@@ -96,6 +96,58 @@ prompt_input() {
 }
 
 #===============================================================================
+# Build HailoRT from source (when apt version is incompatible)
+#===============================================================================
+
+build_hailort_from_source() {
+    local HAILORT_VERSION="${1:-v5.1.1}"
+    
+    print_header "Building HailoRT $HAILORT_VERSION from source"
+    print_warn "This is required because hailo-ollama needs a newer libhailort version."
+    echo ""
+    
+    # Install build dependencies
+    print_step "Installing build dependencies..."
+    sudo apt update
+    sudo apt install -y build-essential cmake pkg-config \
+        libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+        linux-headers-$(uname -r) python3-pip python3-venv git
+    
+    # Clone HailoRT
+    print_step "Cloning HailoRT repository..."
+    local BUILD_DIR="$HOME/.openclaw/hailort-build"
+    mkdir -p "$BUILD_DIR"
+    cd "$BUILD_DIR"
+    
+    if [[ -d "hailort" ]]; then
+        cd hailort
+        git fetch --tags
+    else
+        git clone https://github.com/hailo-ai/hailort.git
+        cd hailort
+    fi
+    
+    git checkout "$HAILORT_VERSION"
+    
+    # Build and install
+    print_step "Building HailoRT (this may take several minutes)..."
+    cmake -S. -Bbuild -DCMAKE_BUILD_TYPE=Release
+    sudo cmake --build build --config release --target install
+    
+    # Update library cache
+    sudo ldconfig
+    
+    # Verify
+    if [[ -f /usr/local/lib/libhailort.so ]] || [[ -f /usr/lib/libhailort.so.5.1.1 ]]; then
+        print_step "HailoRT $HAILORT_VERSION built and installed successfully"
+        return 0
+    else
+        print_error "HailoRT build may have failed - library not found"
+        return 1
+    fi
+}
+
+#===============================================================================
 # Prepare Offline Bundle (run on machine with internet)
 #===============================================================================
 
@@ -505,6 +557,38 @@ phase2_hailo_setup() {
         print_warn "hailo-ollama not available. Skipping model setup."
         print_warn "You can install it later and run model setup manually."
         return
+    fi
+    
+    # Step 5: Test hailo-ollama execution - build HailoRT from source if it fails
+    print_step "Testing hailo-ollama execution..."
+    if ! hailo-ollama --version &>/dev/null 2>&1; then
+        print_warn "hailo-ollama failed to execute (likely libhailort version mismatch)"
+        echo ""
+        echo "The apt version of HailoRT may be incompatible with hailo-ollama."
+        echo "Building HailoRT from source to fix this..."
+        echo ""
+        
+        if [[ "$OFFLINE_MODE" == "true" ]]; then
+            print_error "Cannot build HailoRT from source in offline mode."
+            print_warn "You will need internet access to build HailoRT."
+            return
+        fi
+        
+        if build_hailort_from_source "v5.1.1"; then
+            print_step "Retesting hailo-ollama..."
+            if hailo-ollama --version &>/dev/null 2>&1; then
+                print_step "hailo-ollama now works correctly"
+            else
+                print_error "hailo-ollama still failing after HailoRT rebuild"
+                print_warn "You may need to troubleshoot manually"
+                return
+            fi
+        else
+            print_error "Failed to build HailoRT from source"
+            return
+        fi
+    else
+        print_step "hailo-ollama executes successfully"
     fi
     
     # Prompt user to select model
