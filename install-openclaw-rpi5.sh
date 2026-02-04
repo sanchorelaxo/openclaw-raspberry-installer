@@ -1030,10 +1030,10 @@ phase8_rag_setup() {
         else
             print_warn "nomic-embed-text not found in offline bundle."
             print_warn "You will need to download it when internet is available:"
-            echo "  curl http://localhost:8000/api/pull -d '{\"model\":\"nomic-embed-text\"}'"
+            echo "  curl -H 'Content-Type: application/json' http://localhost:8000/api/pull -d '{\"model\":\"nomic-embed-text\",\"stream\":true}'"
         fi
     else
-        curl -s http://localhost:8000/api/pull -H 'Content-Type: application/json' -d '{"model":"nomic-embed-text","stream":true}' || {
+        curl -s -H 'Content-Type: application/json' http://localhost:8000/api/pull -d '{"model":"nomic-embed-text","stream":true}' || {
             print_warn "Failed to pull nomic-embed-text. You may need to pull it manually."
         }
     fi
