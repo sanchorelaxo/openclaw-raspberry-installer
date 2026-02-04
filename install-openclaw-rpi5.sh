@@ -264,7 +264,7 @@ prepare_offline_bundle() {
             
             for model in $MODELS_TO_DOWNLOAD; do
                 print_step "Downloading $model..."
-                curl -s http://localhost:8000/api/pull -d "{\"model\":\"$model\",\"stream\":false}" || {
+                curl -s http://localhost:8000/api/pull -H 'Content-Type: application/json' -d "{\"model\":\"$model\",\"stream\":true}" || {
                     print_warn "Failed to download $model"
                 }
             done
@@ -635,10 +635,14 @@ phase2_hailo_setup() {
         fi
     else
         print_step "Pulling $SELECTED_MODEL model..."
-        curl -s http://localhost:8000/api/pull -d "{\"model\":\"$SELECTED_MODEL\",\"stream\":false}" || {
-            print_warn "Failed to pull model. You may need to pull it manually later:"
-            echo "  hailo-ollama pull $SELECTED_MODEL"
-        }
+        PULL_RESULT=$(curl -s http://localhost:8000/api/pull -H 'Content-Type: application/json' -d "{\"model\":\"$SELECTED_MODEL\",\"stream\":true}" 2>&1)
+        if echo "$PULL_RESULT" | grep -q "error\|500\|Error"; then
+            print_error "Failed to pull model: $PULL_RESULT"
+            print_warn "You may need to pull it manually later:"
+            echo "  curl http://localhost:8000/api/pull -H 'Content-Type: application/json' -d '{\"model\":\"$SELECTED_MODEL\",\"stream\":true}'"
+        else
+            print_step "Model $SELECTED_MODEL pulled successfully"
+        fi
     fi
     
     # Store selected model for later use in config
@@ -1029,7 +1033,7 @@ phase8_rag_setup() {
             echo "  curl http://localhost:8000/api/pull -d '{\"model\":\"nomic-embed-text\"}'"
         fi
     else
-        curl -s http://localhost:8000/api/pull -d '{"model":"nomic-embed-text","stream":false}' || {
+        curl -s http://localhost:8000/api/pull -H 'Content-Type: application/json' -d '{"model":"nomic-embed-text","stream":true}' || {
             print_warn "Failed to pull nomic-embed-text. You may need to pull it manually."
         }
     fi
