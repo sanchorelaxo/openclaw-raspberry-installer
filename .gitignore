@@ -1,0 +1,15 @@
+# Offline bundle (generated, contains large binaries)
+offline_bundle/
+
+# Node modules
+node_modules/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
