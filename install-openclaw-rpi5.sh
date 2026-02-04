@@ -118,15 +118,23 @@ prepare_offline_bundle() {
     # Get Docker GPG key
     curl -fsSL https://download.docker.com/linux/debian/gpg -o docker.gpg
     
-    # Download Docker .deb packages
-    DOCKER_VERSION="5:27.4.1-1~debian.13~trixie"
+    # Download Docker .deb packages (latest versions for Trixie ARM64)
     BASE_URL="https://download.docker.com/linux/debian/dists/trixie/pool/stable/arm64"
     
-    curl -fsSL "${BASE_URL}/containerd.io_1.7.24-1_arm64.deb" -o containerd.io_arm64.deb || print_warn "containerd download may need manual fetch"
-    curl -fsSL "${BASE_URL}/docker-ce_${DOCKER_VERSION}_arm64.deb" -o docker-ce_arm64.deb || print_warn "docker-ce download may need manual fetch"
-    curl -fsSL "${BASE_URL}/docker-ce-cli_${DOCKER_VERSION}_arm64.deb" -o docker-ce-cli_arm64.deb || print_warn "docker-ce-cli download may need manual fetch"
-    curl -fsSL "${BASE_URL}/docker-buildx-plugin_0.19.3-1~debian.13~trixie_arm64.deb" -o docker-buildx-plugin_arm64.deb || print_warn "buildx download may need manual fetch"
-    curl -fsSL "${BASE_URL}/docker-compose-plugin_2.32.1-1~debian.13~trixie_arm64.deb" -o docker-compose-plugin_arm64.deb || print_warn "compose download may need manual fetch"
+    print_step "Downloading containerd.io..."
+    curl -fsSL "${BASE_URL}/containerd.io_2.2.1-1~debian.13~trixie_arm64.deb" -o containerd.io_arm64.deb || print_warn "containerd download failed"
+    
+    print_step "Downloading docker-ce-cli..."
+    curl -fsSL "${BASE_URL}/docker-ce-cli_29.2.1-1~debian.13~trixie_arm64.deb" -o docker-ce-cli_arm64.deb || print_warn "docker-ce-cli download failed"
+    
+    print_step "Downloading docker-ce..."
+    curl -fsSL "${BASE_URL}/docker-ce_29.2.1-1~debian.13~trixie_arm64.deb" -o docker-ce_arm64.deb || print_warn "docker-ce download failed"
+    
+    print_step "Downloading docker-buildx-plugin..."
+    curl -fsSL "${BASE_URL}/docker-buildx-plugin_0.31.1-1~debian.13~trixie_arm64.deb" -o docker-buildx-plugin_arm64.deb || print_warn "buildx download failed"
+    
+    print_step "Downloading docker-compose-plugin..."
+    curl -fsSL "${BASE_URL}/docker-compose-plugin_5.0.2-1~debian.13~trixie_arm64.deb" -o docker-compose-plugin_arm64.deb || print_warn "compose download failed"
     
     cd "$OFFLINE_DIR"
     
