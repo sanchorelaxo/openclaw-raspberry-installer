@@ -134,6 +134,32 @@ prepare_offline_bundle() {
     print_step "Downloading OpenClaw npm package..."
     npm pack openclaw@latest
     
+    # Hailo software packages
+    print_header "Hailo Software Packages"
+    echo ""
+    echo "For offline installation, you need to manually download Hailo packages."
+    echo ""
+    echo "Required packages:"
+    echo "  1. hailo-all (from Raspberry Pi apt repository)"
+    echo "  2. hailo_gen_ai_model_zoo (from Hailo Developer Zone)"
+    echo ""
+    echo "Steps to prepare Hailo packages:"
+    echo "  1. On a Pi with internet, run: apt download hailo-all"
+    echo "  2. Download GenAI Model Zoo from: https://hailo.ai/developer-zone/software-downloads/"
+    echo "  3. Copy .deb files to: $OFFLINE_DIR/hailo_debs/"
+    echo ""
+    
+    mkdir -p hailo_debs
+    
+    # Try to download hailo-all if apt is available
+    if command -v apt &> /dev/null; then
+        print_step "Attempting to download hailo-all package..."
+        cd hailo_debs
+        apt download hailo-all 2>/dev/null || print_warn "hailo-all not available in apt (may need to run on Pi)"
+        apt download dkms 2>/dev/null || true
+        cd "$OFFLINE_DIR"
+    fi
+    
     # Hailo model selection and download
     print_header "Select Hailo Model for Offline Bundle"
     
@@ -356,23 +382,120 @@ phase1_system_prep_offline() {
 }
 
 #===============================================================================
-# Phase 2: Hailo GenAI Stack
+# Phase 2: Hailo AI HAT+ 2 Setup (Hailo-10H GenAI)
 #===============================================================================
 
 phase2_hailo_setup() {
-    print_header "Phase 2: Hailo GenAI Stack (Primary Model)"
+    print_header "Phase 2: Hailo AI HAT+ 2 Setup (Hailo-10H GenAI)"
     
-    # Check for HailoRT
-    if ! command -v hailo-ollama &> /dev/null; then
-        print_warn "hailo-ollama not found"
+    # Step 1: Check if Hailo-10H is detected via PCIe
+    print_step "Checking for Hailo AI HAT+ 2 hardware..."
+    
+    if ! lspci 2>/dev/null | grep -qi "Hailo"; then
+        print_warn "Hailo device not detected on PCIe bus"
         echo ""
-        echo "Please install HailoRT and Hailo Model Zoo GenAI manually:"
-        echo "  1. Download from https://hailo.ai/developer-zone/"
-        echo "  2. sudo dpkg -i hailo_gen_ai_model_zoo_<ver>_arm64.deb"
+        echo "Troubleshooting steps:"
+        echo "  1. Ensure AI HAT+ 2 is properly connected via PCIe ribbon cable"
+        echo "  2. Check that the Pi 5 Active Cooler is installed"
+        echo "  3. Verify power supply is adequate (27W USB-C recommended)"
         echo ""
-        if ! prompt_yes_no "Continue without Hailo setup?"; then
+        echo "Run 'lspci | grep Hailo' to check detection"
+        echo ""
+        if ! prompt_yes_no "Continue without Hailo hardware detection?"; then
             exit 1
         fi
+    else
+        print_step "Hailo device detected: $(lspci | grep -i Hailo)"
+    fi
+    
+    # Step 2: Install Hailo software stack if not present
+    if ! command -v hailortcli &> /dev/null; then
+        print_step "Installing Hailo software stack..."
+        
+        if [[ "$OFFLINE_MODE" == "true" ]]; then
+            # Offline: Install from bundled .deb packages
+            if [[ -f "$OFFLINE_DIR/hailo_debs/hailo-all.deb" ]]; then
+                sudo dpkg -i "$OFFLINE_DIR/hailo_debs/"*.deb || sudo apt-get install -f -y
+            else
+                print_warn "Hailo packages not found in offline bundle."
+                print_warn "You will need to install manually when internet is available."
+            fi
+        else
+            # Online: Install via apt (Raspberry Pi's official method)
+            print_step "Installing hailo-all package (HailoRT + TAPPAS Core)..."
+            sudo apt update
+            sudo apt install -y dkms
+            sudo apt install -y hailo-all
+        fi
+    else
+        print_step "HailoRT already installed"
+    fi
+    
+    # Step 3: Verify HailoRT installation
+    if command -v hailortcli &> /dev/null; then
+        print_step "Verifying Hailo installation..."
+        hailortcli fw-control identify 2>/dev/null || print_warn "Could not identify Hailo device"
+    fi
+    
+    # Step 4: Install Hailo GenAI Model Zoo (hailo-ollama)
+    if ! command -v hailo-ollama &> /dev/null; then
+        print_step "Installing Hailo GenAI Model Zoo (hailo-ollama)..."
+        
+        if [[ "$OFFLINE_MODE" == "true" ]]; then
+            # Offline: Install from bundled .deb
+            GENAI_DEB=$(ls "$OFFLINE_DIR"/hailo_debs/hailo*genai*.deb 2>/dev/null | head -1)
+            if [[ -f "$GENAI_DEB" ]]; then
+                sudo dpkg -i "$GENAI_DEB" || sudo apt-get install -f -y
+                print_step "Hailo GenAI Model Zoo installed from offline bundle"
+            else
+                print_warn "Hailo GenAI package not found in offline bundle."
+                echo ""
+                echo "To install manually, download from Hailo Developer Zone:"
+                echo "  https://hailo.ai/developer-zone/software-downloads/"
+                echo "Then run: sudo dpkg -i hailo_gen_ai_model_zoo_<ver>_arm64.deb"
+            fi
+        else
+            # Online: Download and install from Hailo
+            print_step "Downloading Hailo GenAI Model Zoo..."
+            echo ""
+            echo "The Hailo GenAI Model Zoo provides hailo-ollama server for LLMs."
+            echo ""
+            echo "Download options:"
+            echo "  1) Auto-download from Raspberry Pi (if available in apt)"
+            echo "  2) Manual download from Hailo Developer Zone"
+            echo ""
+            
+            # Try apt first (Raspberry Pi may add this to their repo)
+            if apt-cache show hailo-genai &>/dev/null; then
+                sudo apt install -y hailo-genai
+            else
+                # Provide manual instructions
+                print_warn "hailo-genai not in apt repository."
+                echo ""
+                echo "Please download manually from Hailo Developer Zone:"
+                echo "  1. Go to: https://hailo.ai/developer-zone/software-downloads/"
+                echo "  2. Download: hailo_gen_ai_model_zoo_5.1.1_arm64.deb (or latest)"
+                echo "  3. Install: sudo dpkg -i hailo_gen_ai_model_zoo_*.deb"
+                echo ""
+                
+                if prompt_yes_no "Have you already downloaded the .deb file?"; then
+                    DEB_PATH=$(prompt_input "Enter path to .deb file" "")
+                    if [[ -f "$DEB_PATH" ]]; then
+                        sudo dpkg -i "$DEB_PATH" || sudo apt-get install -f -y
+                    else
+                        print_warn "File not found. Continuing without hailo-ollama."
+                    fi
+                fi
+            fi
+        fi
+    else
+        print_step "hailo-ollama already installed"
+    fi
+    
+    # Check if hailo-ollama is now available
+    if ! command -v hailo-ollama &> /dev/null; then
+        print_warn "hailo-ollama not available. Skipping model setup."
+        print_warn "You can install it later and run model setup manually."
         return
     fi
     

@@ -62,10 +62,23 @@ cd ~/openclaw-raspberry-installer
 
 ## Prerequisites
 
-- Raspberry Pi 5 with Raspberry Pi OS Trixie
-- Hailo AI HAT+ 2 installed
-- HailoRT installed from [Hailo Developer Zone](https://hailo.ai/developer-zone/)
+### Hardware
+- **Raspberry Pi 5** (8GB recommended)
+- **Raspberry Pi AI HAT+ 2** with Hailo-10H (40 TOPS INT4, 8GB on-board RAM)
+- **27W USB-C Power Supply** (official Raspberry Pi recommended)
+- **Active Cooler** for Raspberry Pi 5 (recommended)
+- **AI HAT+ 2 heatsink** installed (included with HAT)
+
+### Software
+- **Raspberry Pi OS Trixie (64-bit)** - latest version with updates
 - Internet connection for online install (or use `--offline` mode)
+
+### Hardware Setup (before running installer)
+1. Update Pi firmware: `sudo apt update && sudo apt full-upgrade`
+2. Install Active Cooler on Pi 5
+3. Install AI HAT+ 2 heatsink (thermal pads on NPU and RAM)
+4. Mount AI HAT+ 2 with spacers and connect PCIe ribbon cable
+5. Verify detection: `lspci | grep Hailo` should show the device
 
 ## Installation Phases
 
@@ -74,15 +87,17 @@ cd ~/openclaw-raspberry-installer
 - Installs Node.js 22+ via `n` version manager
 - Installs Docker (Trixie-specific method)
 
-### Phase 2: Hailo GenAI Stack
+### Phase 2: Hailo AI HAT+ 2 Setup
+- Detects Hailo-10H via PCIe (`lspci | grep Hailo`)
+- Installs `hailo-all` package (HailoRT + TAPPAS Core) via apt
+- Installs Hailo GenAI Model Zoo (hailo-ollama server)
 - Prompts user to select from available models:
   - `qwen2:1.5b` - General purpose (default)
   - `qwen2.5:1.5b` - Improved general purpose
   - `qwen2.5-coder:1.5b` - Optimized for coding
   - `llama3.2:1b` - Meta's compact model
   - `deepseek_r1:1.5b` - Reasoning-focused model
-- Configures hailo-ollama server
-- Pulls selected model
+- Pulls selected model via hailo-ollama API
 
 ### Phase 3: OpenClaw Installation
 - Installs OpenClaw CLI
@@ -191,11 +206,36 @@ openclaw doctor
 
 ## Troubleshooting
 
-### Hailo not detected
-Ensure HailoRT is installed:
+### Hailo AI HAT+ 2 not detected
+Check PCIe connection:
 ```bash
-# Download from https://hailo.ai/developer-zone/
-sudo dpkg -i hailo_gen_ai_model_zoo_<ver>_arm64.deb
+lspci | grep Hailo
+# Should show: "Co-processor: Hailo Technologies Ltd. Hailo-10 AI Processor"
+```
+
+If not detected:
+1. Verify PCIe ribbon cable is properly connected
+2. Check power supply (27W USB-C recommended)
+3. Update firmware: `sudo apt update && sudo apt full-upgrade`
+4. Reboot and try again
+
+### Install Hailo software stack
+```bash
+sudo apt update
+sudo apt install -y dkms
+sudo apt install -y hailo-all
+```
+
+### Verify HailoRT installation
+```bash
+hailortcli fw-control identify
+# Should show device info including "Hailo-10H"
+```
+
+### Install Hailo GenAI Model Zoo (hailo-ollama)
+Download from [Hailo Developer Zone](https://hailo.ai/developer-zone/software-downloads/):
+```bash
+sudo dpkg -i hailo_gen_ai_model_zoo_5.1.1_arm64.deb
 ```
 
 ### Node.js version issues
