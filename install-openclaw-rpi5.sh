@@ -641,15 +641,38 @@ phase2_hailo_setup() {
             echo "  hailo-ollama pull $SELECTED_MODEL"
         fi
     else
-        print_step "Pulling $SELECTED_MODEL model..."
-        PULL_RESULT=$(curl -s http://localhost:8000/api/pull -H 'Content-Type: application/json' -d "{\"model\":\"$SELECTED_MODEL\",\"stream\":true}" 2>&1)
-        if echo "$PULL_RESULT" | grep -q "error\|500\|Error"; then
-            print_error "Failed to pull model: $PULL_RESULT"
-            print_warn "You may need to pull it manually later:"
-            echo "  curl http://localhost:8000/api/pull -H 'Content-Type: application/json' -d '{\"model\":\"$SELECTED_MODEL\",\"stream\":true}'"
+        print_step "Pulling $SELECTED_MODEL model (this may take several minutes)..."
+        echo ""
+        
+        # Use a temp file to capture output while showing progress
+        PULL_OUTPUT=$(mktemp)
+        
+        # Run curl and tee output to both terminal and file
+        if curl -s http://localhost:8000/api/pull \
+            -H 'Content-Type: application/json' \
+            -d "{\"model\":\"$SELECTED_MODEL\",\"stream\":true}" 2>&1 | tee "$PULL_OUTPUT"; then
+            
+            # Check if output contains error indicators
+            if grep -qi "error\|500\|failed\|not found" "$PULL_OUTPUT"; then
+                echo ""
+                print_error "Model pull encountered an error"
+                print_warn "You may need to pull it manually later:"
+                echo "  curl http://localhost:8000/api/pull -H 'Content-Type: application/json' -d '{\"model\":\"$SELECTED_MODEL\",\"stream\":true}'"
+            elif [[ ! -s "$PULL_OUTPUT" ]]; then
+                echo ""
+                print_error "No response from hailo-ollama server"
+                print_warn "Check if hailo-ollama is running: ps aux | grep hailo-ollama"
+            else
+                echo ""
+                print_step "Model $SELECTED_MODEL pulled successfully"
+            fi
         else
-            print_step "Model $SELECTED_MODEL pulled successfully"
+            echo ""
+            print_error "curl command failed"
+            print_warn "Check network connectivity and hailo-ollama server status"
         fi
+        
+        rm -f "$PULL_OUTPUT"
     fi
     
     # Store selected model for later use in config
