@@ -722,6 +722,9 @@ phase3_openclaw_install() {
     
     cat > "$OPENCLAW_CONFIG" << EOF
 {
+  "gateway": {
+    "mode": "local"
+  },
   "agent": {
     "model": "$OLLAMA_MODEL",
     "provider": {
