@@ -559,10 +559,15 @@ phase2_hailo_setup() {
         return
     fi
     
-    # Step 5: Test hailo-ollama execution - build HailoRT from source if it fails
-    print_step "Testing hailo-ollama execution..."
-    if ! hailo-ollama --version &>/dev/null 2>&1; then
-        print_warn "hailo-ollama failed to execute (likely libhailort version mismatch)"
+    # Step 5: Check if libhailort version matches hailo-ollama requirements
+    # hailo-ollama from GenAI Model Zoo 5.1.1 requires libhailort.so.5.1.1
+    print_step "Checking libhailort version compatibility..."
+    
+    REQUIRED_LIB="libhailort.so.5.1.1"
+    if ! ldconfig -p | grep -q "$REQUIRED_LIB" && \
+       ! [[ -f /usr/lib/$REQUIRED_LIB ]] && \
+       ! [[ -f /usr/local/lib/$REQUIRED_LIB ]]; then
+        print_warn "Required $REQUIRED_LIB not found (hailo-ollama needs HailoRT 5.1.1)"
         echo ""
         echo "The apt version of HailoRT may be incompatible with hailo-ollama."
         echo "Building HailoRT from source to fix this..."
@@ -575,20 +580,22 @@ phase2_hailo_setup() {
         fi
         
         if build_hailort_from_source "v5.1.1"; then
-            print_step "Retesting hailo-ollama..."
-            if hailo-ollama --version &>/dev/null 2>&1; then
-                print_step "hailo-ollama now works correctly"
-            else
-                print_error "hailo-ollama still failing after HailoRT rebuild"
-                print_warn "You may need to troubleshoot manually"
-                return
+            # Update symlinks to point to new library
+            print_step "Updating library symlinks..."
+            sudo rm -f /usr/lib/libhailort.so 2>/dev/null || true
+            if [[ -f /usr/local/lib/libhailort.so.5.1.1 ]]; then
+                sudo ln -sf /usr/local/lib/libhailort.so.5.1.1 /usr/lib/libhailort.so
+                sudo ln -sf /usr/local/lib/libhailort.so.5.1.1 /usr/lib/libhailort.so.5.1.1
+                echo "/usr/local/lib" | sudo tee /etc/ld.so.conf.d/hailort.conf > /dev/null
             fi
+            sudo ldconfig
+            print_step "HailoRT 5.1.1 installed and configured"
         else
             print_error "Failed to build HailoRT from source"
             return
         fi
     else
-        print_step "hailo-ollama executes successfully"
+        print_step "libhailort 5.1.1 found - compatible with hailo-ollama"
     fi
     
     # Prompt user to select model
