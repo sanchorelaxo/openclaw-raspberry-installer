@@ -96,6 +96,43 @@ prompt_input() {
 }
 
 #===============================================================================
+# Homebrew (Linuxbrew) - required by some OpenClaw tooling on Raspberry Pi
+#===============================================================================
+
+ensure_homebrew() {
+    if command -v brew &> /dev/null; then
+        return 0
+    fi
+
+    print_warn "Homebrew (brew) not found"
+
+    if [[ "$OFFLINE_MODE" == "true" ]]; then
+        print_warn "Offline mode enabled - skipping Homebrew install"
+        print_warn "If OpenClaw fails due to missing brew, re-run with internet access"
+        return 0
+    fi
+
+    print_step "Installing Homebrew..."
+    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+    if [[ -d "$HOME/.linuxbrew" ]]; then
+        eval "$("$HOME/.linuxbrew/bin/brew" shellenv)"
+    elif [[ -d "/home/linuxbrew/.linuxbrew" ]]; then
+        eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+    fi
+
+    if command -v brew &> /dev/null; then
+        if ! grep -q 'brew shellenv' "$HOME/.bashrc" 2>/dev/null; then
+            echo 'eval "$("$(brew --prefix)"/bin/brew shellenv)"' >> "$HOME/.bashrc"
+        fi
+        brew -h &> /dev/null || true
+        print_step "Homebrew installed"
+    else
+        print_warn "Homebrew install did not add brew to PATH (may require re-login)"
+    fi
+}
+
+#===============================================================================
 # Build HailoRT from source (when apt version is incompatible)
 #===============================================================================
 
@@ -687,6 +724,8 @@ phase2_hailo_setup() {
 
 phase3_openclaw_install() {
     print_header "Phase 3: OpenClaw Installation"
+
+    ensure_homebrew
     
     if ! command -v openclaw &> /dev/null; then
         if [[ "$OFFLINE_MODE" == "true" ]]; then
