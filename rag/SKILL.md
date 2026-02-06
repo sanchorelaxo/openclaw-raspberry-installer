@@ -2,27 +2,37 @@
 
 Search and query local documents using vector embeddings and Hailo-accelerated LLM inference.
 
-## test_rag.py
-Indexes local documents and answers questions using retrieval-augmented generation.
+## rag_query.py
+Reusable RAG engine that accepts queries dynamically.
 
 **Usage:**
 ```bash
-# Run automated test queries
-python3 test_rag.py
+# Single query via CLI argument
+python3 rag_query.py "What is this document about?"
 
-# Interactive query mode
-python3 test_rag.py --interactive
+# Interactive mode
+python3 rag_query.py --interactive
+
+# Query via stdin
+echo "Summarize this document" | python3 rag_query.py
 ```
 
-**Test mode output:**
-- RAG configuration summary
-- Document loading and indexing status
-- Results for built-in test queries (summarize, main topics)
+**Programmatic usage (from Python):**
+```python
+from rag_query import RAGEngine
 
-**Interactive mode:**
-- Loads and indexes documents from the data directory
-- Accepts free-form questions, answers using retrieved context
-- Type `quit` to exit
+engine = RAGEngine()
+answer = engine.query_str("What is this document about?")
+results = engine.batch_query(["Question 1", "Question 2"])
+```
+
+## test_rag.py
+Runs predefined test queries against the RAG engine to verify the pipeline works.
+
+**Usage:**
+```bash
+python3 test_rag.py
+```
 
 ## Configuration
 
