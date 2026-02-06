@@ -25,7 +25,7 @@ Automated installer for OpenClaw on the CanaKit Raspberry Pi 5 8GB Dual Cooling 
 
 ### Online Installation (requires internet on Pi)
 ```bash
-git clone https://github.com/yourusername/openclaw-raspberry-installer.git
+git clone https://github.com/sanchorelaxo/openclaw-raspberry-installer.git
 cd openclaw-raspberry-installer
 ./install-openclaw-rpi5.sh
 ```
