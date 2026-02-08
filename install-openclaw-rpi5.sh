@@ -519,16 +519,41 @@ phase2_hailo_setup() {
             fi
         else
             # Online: Install via apt (Raspberry Pi's official method)
-            print_step "Installing hailo-all package (HailoRT + TAPPAS Core)..."
+            # IMPORTANT: Use hailo-h10-all for Hailo-10H (AI HAT+ 2), NOT hailo-all.
+            # hailo-all is for Hailo-8/8L and installs a PCIe driver (4.23.0) that
+            # doesn't support Hailo-10H, causing "Failed to create VDevice" errors.
+            print_step "Installing hailo-h10-all package (HailoRT for Hailo-10H)..."
             sudo apt update
             sudo apt install -y dkms
-            sudo apt install -y hailo-all
+            sudo apt install -y hailo-h10-all
         fi
     else
         print_step "HailoRT already installed"
     fi
     
-    # Step 3: Verify HailoRT installation
+    # Step 3: Ensure hailo_pci kernel module loads at boot and is loaded now.
+    # The hailort-pcie-driver package installs the module but doesn't always
+    # configure autoload, so /dev/hailo0 may be missing after reboot.
+    print_step "Ensuring hailo_pci kernel module is loaded..."
+    if ! lsmod | grep -q hailo_pci; then
+        sudo modprobe hailo_pci || print_warn "Failed to load hailo_pci module"
+    fi
+    if ! grep -q 'hailo_pci' /etc/modules-load.d/hailo.conf 2>/dev/null; then
+        echo "hailo_pci" | sudo tee /etc/modules-load.d/hailo.conf > /dev/null
+        print_step "hailo_pci added to /etc/modules-load.d/ for boot autoload"
+    fi
+    # Wait briefly for /dev/hailo0 to appear
+    for i in $(seq 1 5); do
+        [[ -e /dev/hailo0 ]] && break
+        sleep 1
+    done
+    if [[ ! -e /dev/hailo0 ]]; then
+        print_warn "/dev/hailo0 not found — Hailo device may not be accessible"
+    else
+        print_step "/dev/hailo0 present"
+    fi
+    
+    # Step 3b: Verify HailoRT installation
     if command -v hailortcli &> /dev/null; then
         print_step "Verifying Hailo installation..."
         hailortcli fw-control identify 2>/dev/null || print_warn "Could not identify Hailo device"
@@ -658,9 +683,64 @@ phase2_hailo_setup() {
     
     print_step "Selected model: $SELECTED_MODEL"
     
-    print_step "Starting hailo-ollama server..."
-    hailo-ollama &
-    sleep 3
+    # Step 6: Disable hailort_service if running (conflicts with hailo-ollama on Hailo-10H)
+    # hailort_service is a multi-process RPC daemon for Hailo-8/8L. On Hailo-10H,
+    # parallelism uses VDevice group_id="SHARED" instead. If hailort_service is
+    # running, it holds /dev/hailo0 exclusively and hailo-ollama gets
+    # HAILO_OUT_OF_PHYSICAL_DEVICES (status=74).
+    if systemctl is-active --quiet hailort 2>/dev/null; then
+        print_warn "hailort_service is running — stopping it (conflicts with hailo-ollama on Hailo-10H)"
+        sudo systemctl stop hailort
+        sudo systemctl disable hailort
+        print_step "hailort_service stopped and disabled"
+    fi
+    
+    # Step 7: Create systemd service for hailo-ollama (persistent server)
+    # hailo-ollama MUST be running before OpenClaw or any client can use it.
+    # It is a standalone C++ REST server (Ollama-compatible API on port 8000),
+    # NOT the real Ollama binary — symlinking would not work.
+    print_step "Creating systemd service for hailo-ollama..."
+    
+    HAILO_OLLAMA_BIN=$(command -v hailo-ollama)
+    
+    sudo tee /etc/systemd/system/hailo-ollama.service > /dev/null << EOF
+[Unit]
+Description=Hailo-Ollama GenAI Server (Ollama-compatible API on Hailo-10H)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=$HAILO_OLLAMA_BIN
+ExecStartPost=/bin/bash -c 'sleep 2 && curl -s -X POST http://localhost:8000/api/pull -H "Content-Type: application/json" -d "{\"model\":\"$SELECTED_MODEL\",\"stream\":false}" > /dev/null 2>&1'
+Restart=on-failure
+RestartSec=5
+User=$USER
+Environment=HOME=$HOME
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    
+    sudo systemctl daemon-reload
+    sudo systemctl enable hailo-ollama.service
+    sudo systemctl start hailo-ollama.service
+    
+    # Wait for the server to be ready
+    print_step "Waiting for hailo-ollama server to start..."
+    for i in $(seq 1 15); do
+        if curl -s http://localhost:8000/api/version &>/dev/null; then
+            print_step "hailo-ollama server is running on port 8000"
+            break
+        fi
+        sleep 1
+    done
+    
+    if ! curl -s http://localhost:8000/api/version &>/dev/null; then
+        print_error "hailo-ollama server failed to start"
+        print_warn "Check logs with: journalctl -u hailo-ollama.service"
+        return
+    fi
     
     if [[ "$OFFLINE_MODE" == "true" ]]; then
         # Check if model exists in offline bundle
@@ -715,6 +795,53 @@ phase2_hailo_setup() {
     # Store selected model for later use in config
     HAILO_MODEL="$SELECTED_MODEL"
     
+    # --- Install the sanitizing proxy ---
+    # hailo-ollama's oatpp framework crashes on fields OpenClaw sends (tools,
+    # stream_options, store) and its /api/show DTO is buggy. The proxy:
+    #   - Strips unsupported request fields
+    #   - Replaces massive system prompt with minimal one (2048-token context)
+    #   - Converts non-streaming response to SSE for OpenClaw's SDK
+    #   - Fixes nanosecond timestamps and missing usage fields
+    #   - Fakes /api/show to avoid DTO crash
+    print_step "Installing hailo-ollama sanitizing proxy..."
+    
+    PROXY_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hailo-sanitize-proxy.py"
+    if [[ ! -f "$PROXY_SRC" ]]; then
+        print_error "hailo-sanitize-proxy.py not found alongside installer"
+        print_warn "Expected at: $PROXY_SRC"
+    else
+        sudo cp "$PROXY_SRC" /usr/local/bin/hailo-sanitize-proxy.py
+        sudo chmod +x /usr/local/bin/hailo-sanitize-proxy.py
+        
+        sudo tee /etc/systemd/system/hailo-sanitize-proxy.service > /dev/null << 'EOF'
+[Unit]
+Description=Hailo-Ollama Sanitizing Proxy
+After=hailo-ollama.service
+Requires=hailo-ollama.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/hailo-sanitize-proxy.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        
+        sudo systemctl daemon-reload
+        sudo systemctl enable hailo-sanitize-proxy.service
+        sudo systemctl start hailo-sanitize-proxy.service
+        
+        # Verify proxy is running
+        sleep 2
+        if curl -s http://127.0.0.1:8081/api/tags &>/dev/null; then
+            print_step "Sanitizing proxy running on port 8081"
+        else
+            print_warn "Sanitizing proxy may not have started — check: journalctl -u hailo-sanitize-proxy"
+        fi
+    fi
+    
     print_step "Hailo GenAI stack configured with $SELECTED_MODEL"
 }
 
@@ -752,39 +879,129 @@ phase3_openclaw_install() {
         print_warn "Onboarding may require manual completion"
     }
     
+    # Fix: remove duplicate nextcloud-talk extension from user-space if it exists.
+    # OpenClaw bundles nextcloud-talk in its npm-global extensions dir; a second
+    # copy under ~/.openclaw/extensions causes "duplicate plugin id" warnings and
+    # may fail to load due to missing 'zod' dependency.
+    if [[ -d "$HOME/.openclaw/extensions/nextcloud-talk" ]]; then
+        print_step "Removing duplicate nextcloud-talk extension (bundled copy is sufficient)..."
+        rm -rf "$HOME/.openclaw/extensions/nextcloud-talk"
+    fi
+    
     # Configure Hailo as primary model (use selected model from phase2)
+    # NOTE: We use EXPLICIT provider config via the sanitizing proxy (port 8081):
+    #   1. hailo-ollama runs on port 8000 with OpenAI-compatible /v1 endpoints
+    #   2. The proxy strips unsupported fields, simplifies system prompts,
+    #      converts responses to SSE, and fakes /api/show
+    #   3. Explicit config with "api": "openai-completions" uses /v1/chat/completions
     print_step "Configuring Hailo $HAILO_MODEL as primary model..."
     mkdir -p "$(dirname "$OPENCLAW_CONFIG")"
     
-    # Convert model name for ollama format (e.g., qwen2:1.5b -> ollama/qwen2:1.5b)
-    OLLAMA_MODEL="ollama/${HAILO_MODEL:-qwen2:1.5b}"
+    # Remove any old iptables redirect rules from previous install attempts
+    sudo iptables -t nat -D OUTPUT -p tcp -d 127.0.0.1 --dport 11434 -j REDIRECT --to-port 8000 2>/dev/null || true
+    sudo netfilter-persistent save 2>/dev/null || true
     
+    # Unset OLLAMA_API_KEY — we use explicit provider config, not auto-discovery.
+    # Auto-discovery probes /api/show which causes 500 errors on hailo-ollama.
+    sed -i '/OLLAMA_API_KEY/d' "$HOME/.bashrc" 2>/dev/null || true
+    mkdir -p "$HOME/.openclaw"
+    sed -i '/OLLAMA_API_KEY/d' "$HOME/.openclaw/.env" 2>/dev/null || true
+    unset OLLAMA_API_KEY 2>/dev/null || true
+    
+    # Convert model name for ollama provider format (e.g., qwen2:1.5b -> ollama/qwen2:1.5b)
+    # We use the sanitizing proxy on port 8081 which handles:
+    # - Stripping unsupported fields (tools, stream_options, store)
+    # - Replacing massive system prompt with minimal one (2048-token context)
+    # - Converting non-streaming response to SSE for OpenClaw's SDK
+    # - Fixing nanosecond timestamps and missing usage fields
+    # - Faking /api/show to avoid hailo-ollama DTO crash
+    HAILO_PROVIDER_MODEL="ollama/${HAILO_MODEL:-qwen2:1.5b}"
+    MODEL_ID="${HAILO_MODEL:-qwen2:1.5b}"
+    
+    # Use explicit provider config with /v1/chat/completions via sanitizing proxy.
+    # The proxy (port 8081) sits between OpenClaw and hailo-ollama (port 8000).
+    # We set contextWindow to 16000 to satisfy OpenClaw's minimum requirement
+    # (real context is 2048, maxTokens caps actual generation).
     cat > "$OPENCLAW_CONFIG" << EOF
 {
   "gateway": {
     "mode": "local"
   },
-  "agent": {
-    "model": "$OLLAMA_MODEL",
-    "provider": {
+  "models": {
+    "providers": {
       "ollama": {
-        "baseUrl": "http://localhost:8000"
+        "baseUrl": "http://localhost:8081/v1",
+        "apiKey": "hailo-local",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "$MODEL_ID",
+            "name": "$MODEL_ID",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 16000,
+            "maxTokens": 2048
+          }
+        ]
       }
     }
   },
   "agents": {
     "defaults": {
+      "model": {
+        "primary": "$HAILO_PROVIDER_MODEL"
+      },
+      "models": {
+        "$HAILO_PROVIDER_MODEL": {
+          "streaming": false
+        }
+      },
+      "sandbox": {
+        "mode": "all"
+      },
       "heartbeat": {
         "every": "4h",
         "activeHours": { "start": "07:00", "end": "18:00" },
         "target": "last"
       }
     }
+  },
+  "tools": {
+    "deny": ["*"]
+  },
+  "plugins": {
+    "allow": ["nextcloud-talk"]
   }
 }
 EOF
     
-    print_step "OpenClaw configured with local Hailo model"
+    print_step "OpenClaw configured with Hailo-Ollama via sanitizing proxy"
+    print_step "Primary model: $HAILO_PROVIDER_MODEL (cost: \$0)"
+    
+    # Write auth profile so the agent can use the Ollama provider.
+    # OpenClaw requires a credential entry in auth-profiles.json even for local
+    # providers that don't need real auth (known issue: openclaw/openclaw#3740).
+    print_step "Writing Ollama auth profile for main agent..."
+    mkdir -p "$HOME/.openclaw/agents/main/agent"
+    cat > "$HOME/.openclaw/agents/main/agent/auth-profiles.json" << 'EOF'
+{
+  "ollama:local": {
+    "type": "token",
+    "provider": "ollama",
+    "token": "hailo-local"
+  },
+  "lastGood": {
+    "ollama": "ollama:local"
+  }
+}
+EOF
+    
+    # Restart OpenClaw daemon so it picks up the new config.
+    print_step "Restarting OpenClaw daemon with Hailo model config..."
+    openclaw daemon restart 2>/dev/null || openclaw gateway restart 2>/dev/null || {
+        print_warn "Could not restart daemon automatically — restart manually after install"
+    }
 }
 
 #===============================================================================
@@ -1221,6 +1438,11 @@ main() {
     print_header "Installation Complete!"
     
     echo "OpenClaw is now installed and configured."
+    echo ""
+    echo "Services:"
+    echo "  hailo-ollama : systemd service on port 8000 (auto-starts on boot)"
+    echo "    sudo systemctl status hailo-ollama"
+    echo "    sudo journalctl -u hailo-ollama -f"
     echo ""
     echo "First boot task:"
     echo "  - Check Moltbook connection"

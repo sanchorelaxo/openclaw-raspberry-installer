@@ -89,8 +89,17 @@ cd ~/openclaw-raspberry-installer
 
 ### Phase 2: Hailo AI HAT+ 2 Setup
 - Detects Hailo-10H via PCIe (`lspci | grep Hailo`)
-- Installs `hailo-all` package (HailoRT + TAPPAS Core) via apt
+- Installs `hailo-h10-all` package (HailoRT for Hailo-10H) via apt
 - Installs Hailo GenAI Model Zoo (hailo-ollama server)
+- Creates **systemd service** (`hailo-ollama.service`) so the server starts on boot
+  - hailo-ollama is an Ollama-compatible REST API on **port 8000** (not actual Ollama)
+  - Must be running before OpenClaw or any client can use it
+- Installs **sanitizing proxy** (`hailo-sanitize-proxy.service`) on **port 8081**
+  - Strips unsupported request fields that crash hailo-ollama's oatpp DTOs
+  - Replaces OpenClaw's massive system prompt with a minimal one (2048-token context)
+  - Converts non-streaming responses to SSE format for OpenClaw's SDK
+  - Fixes nanosecond timestamps and missing usage fields in responses
+  - Fakes `/api/show` to avoid hailo-ollama DTO crash
 - Prompts user to select from available models:
   - `qwen2:1.5b` - General purpose (default)
   - `qwen2.5:1.5b` - Improved general purpose
@@ -102,7 +111,12 @@ cd ~/openclaw-raspberry-installer
 ### Phase 3: OpenClaw Installation
 - Installs OpenClaw CLI
 - Runs onboarding wizard
-- Configures Hailo as primary model provider (no cloud auth needed)
+- Removes `OLLAMA_API_KEY` to disable auto-discovery (which probes buggy `/api/show`)
+- Configures **explicit** Ollama provider pointing to sanitizing proxy on **port 8081**
+  - Uses `api: "openai-completions"` with `/v1/chat/completions` endpoint
+  - Model definitions advertise `contextWindow: 16000` (OpenClaw minimum; real is 2048)
+  - All tools denied (`tools.deny: ["*"]`) — 1.5B models can't handle tool calls
+  - Writes `auth-profiles.json` with dummy token (required by OpenClaw)
 
 ### Phase 4: Deploy Custom Configuration
 - Deploys `clawdbot-assistant.md` as `CLAUDE.md` and `AGENTS.md`
@@ -187,6 +201,10 @@ openclaw-raspberry-installer/
 ## Usage After Installation
 
 ```bash
+# hailo-ollama + sanitizing proxy run as systemd services (auto-start on boot)
+sudo systemctl status hailo-ollama hailo-sanitize-proxy
+sudo journalctl -u hailo-sanitize-proxy -f  # Proxy logs show request/response flow
+
 # Start OpenClaw gateway
 openclaw gateway --port 18789 --verbose
 
@@ -236,6 +254,43 @@ hailortcli fw-control identify
 Download from [Hailo Developer Zone](https://hailo.ai/developer-zone/software-downloads/):
 ```bash
 sudo dpkg -i hailo_gen_ai_model_zoo_5.1.1_arm64.deb
+```
+
+### HAILO_OUT_OF_PHYSICAL_DEVICES (status=74)
+The `hailort_service` (multi-process RPC daemon for Hailo-8/8L) conflicts with hailo-ollama
+on Hailo-10H by competing for `/dev/hailo0`. Disable it:
+```bash
+sudo systemctl stop hailort
+sudo systemctl disable hailort
+sudo systemctl restart hailo-ollama
+```
+
+### hailo-ollama service not running
+```bash
+sudo systemctl status hailo-ollama
+sudo systemctl restart hailo-ollama
+sudo journalctl -u hailo-ollama -f   # View logs
+curl http://localhost:8000/api/version  # Test API
+```
+
+### OpenClaw can't reach model provider
+Both hailo-ollama (port 8000) and the sanitizing proxy (port 8081) must be running.
+OpenClaw connects to the **proxy** on port 8081, which forwards to hailo-ollama on port 8000.
+```bash
+# Check both services
+sudo systemctl status hailo-ollama hailo-sanitize-proxy
+# Test the chain
+curl http://localhost:8000/api/tags     # Direct to hailo-ollama
+curl http://localhost:8081/api/tags     # Through proxy
+# Check OpenClaw config points to proxy
+cat ~/.openclaw/openclaw.json | grep baseUrl
+# Should show: http://localhost:8081/v1
+```
+
+### Sanitizing proxy issues
+```bash
+sudo journalctl -u hailo-sanitize-proxy -f   # View proxy logs
+sudo systemctl restart hailo-sanitize-proxy   # Restart proxy
 ```
 
 ### Node.js version issues
