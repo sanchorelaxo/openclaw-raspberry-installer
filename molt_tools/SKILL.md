@@ -1,3 +1,8 @@
+---
+name: molt_tools
+description: Moltbook integration (check status/DMs/feed and post updates).
+---
+
 # Moltbook Skill
 
 Tools for interacting with Moltbook social platform.

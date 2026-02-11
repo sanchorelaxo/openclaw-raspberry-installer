@@ -21,15 +21,24 @@ from pathlib import Path
 
 from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, Settings
 from llama_index.embeddings.ollama import OllamaEmbedding
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
+from llama_index.llms.openai import OpenAI
+from llama_index.llms.openai import utils as openai_utils
+from llama_index.llms.openai import base as openai_base
+import tiktoken
 
 
 def get_config():
     """Load configuration from environment or defaults"""
     return {
         "ollama_base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:8000"),
+        "openai_base_url": os.getenv("OPENAI_API_BASE", "http://127.0.0.1:8081/v1"),
+        "openai_api_key": os.getenv("OPENAI_API_KEY", "hailo-local"),
         "llm_model": os.getenv("HAILO_MODEL", "qwen2:1.5b"),
-        "embed_model": "nomic-embed-text",
+        "llm_provider": os.getenv("LLM_PROVIDER", "openai"),
+        "embed_provider": os.getenv("EMBEDDINGS_PROVIDER", "local"),
+        "embed_model": os.getenv("EMBEDDINGS_MODEL", "sentence-transformers/all-MiniLM-L6-v2"),
         "data_dir": os.getenv("RAG_DATA_DIR", os.path.expanduser("~/.openclaw/rag_documents")),
         "request_timeout": 300.0,
         "temperature": 0.1,
@@ -41,19 +50,64 @@ def get_config():
 
 def initialize_models(config):
     """Initialize embedding and LLM models"""
+    embed_provider = config.get("embed_provider", "local")
+    if embed_provider == "ollama":
+        embed_model = OllamaEmbedding(
+            model_name=config["embed_model"],
+            base_url=config["ollama_base_url"],
+            request_timeout=config["request_timeout"],
+        )
+    else:
+        embed_model = HuggingFaceEmbedding(
+            model_name=config["embed_model"],
+        )
     
-    embed_model = OllamaEmbedding(
-        model_name=config["embed_model"],
-        base_url=config["ollama_base_url"],
-        request_timeout=config["request_timeout"],
-    )
-    
-    llm = Ollama(
-        model=config["llm_model"],
-        base_url=config["ollama_base_url"],
-        request_timeout=config["request_timeout"],
-        temperature=config["temperature"],
-    )
+    llm_provider = config.get("llm_provider", "openai")
+    if llm_provider == "ollama":
+        llm = Ollama(
+            model=config["llm_model"],
+            base_url=config["ollama_base_url"],
+            request_timeout=config["request_timeout"],
+            temperature=config["temperature"],
+            context_window=16000,
+            is_function_calling_model=False,
+        )
+    else:
+        if not hasattr(openai_utils, "_original_openai_modelname_to_contextsize"):
+            openai_utils._original_openai_modelname_to_contextsize = (
+                openai_utils.openai_modelname_to_contextsize
+            )
+        if not hasattr(openai_base, "_original_openai_modelname_to_contextsize"):
+            openai_base._original_openai_modelname_to_contextsize = (
+                openai_base.openai_modelname_to_contextsize
+            )
+
+        def _fallback_context_window(model_name):
+            try:
+                return openai_utils._original_openai_modelname_to_contextsize(model_name)
+            except Exception:
+                return 16000
+
+        openai_utils.openai_modelname_to_contextsize = _fallback_context_window
+        openai_base.openai_modelname_to_contextsize = _fallback_context_window
+
+        if not hasattr(tiktoken, "_original_encoding_for_model"):
+            tiktoken._original_encoding_for_model = tiktoken.encoding_for_model
+
+        def _fallback_encoding_for_model(model_name):
+            try:
+                return tiktoken._original_encoding_for_model(model_name)
+            except Exception:
+                return tiktoken.get_encoding("cl100k_base")
+
+        tiktoken.encoding_for_model = _fallback_encoding_for_model
+        llm = OpenAI(
+            model=config["llm_model"],
+            api_base=config["openai_base_url"],
+            api_key=config["openai_api_key"],
+            temperature=config["temperature"],
+            timeout=config["request_timeout"],
+        )
     
     Settings.embed_model = embed_model
     Settings.llm = llm
@@ -167,8 +221,11 @@ def main():
 
     config = get_config()
     print(f"RAG Configuration:")
+    print(f"  LLM Provider: {config['llm_provider']}")
     print(f"  Ollama URL: {config['ollama_base_url']}")
+    print(f"  OpenAI Base URL: {config['openai_base_url']}")
     print(f"  LLM Model: {config['llm_model']}")
+    print(f"  Embed Provider: {config['embed_provider']}")
     print(f"  Embed Model: {config['embed_model']}")
     print(f"  Data Dir: {config['data_dir']}")
     print()

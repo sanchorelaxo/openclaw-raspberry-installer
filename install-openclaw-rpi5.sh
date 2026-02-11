@@ -22,6 +22,7 @@ OFFLINE_DIR="$SCRIPT_DIR/offline_bundle"
 OFFLINE_MODE=false
 PREPARE_OFFLINE=false
 USE_SANITIZER_PROXY_ON_OLLAMA=${USE_SANITIZER_PROXY_ON_OLLAMA:-true}
+USE_OPENCLAW_TOOLS=${USE_OPENCLAW_TOOLS:-true}
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -928,6 +929,15 @@ phase3_openclaw_install() {
     # The proxy (port 8081) sits between OpenClaw and hailo-ollama (port 8000).
     # We set contextWindow to 16000 to satisfy OpenClaw's minimum requirement
     # (real context is 2048, maxTokens caps actual generation).
+    if [[ "$USE_OPENCLAW_TOOLS" == "true" ]]; then
+        TOOLS_BLOCK=""
+    else
+        TOOLS_BLOCK='  "tools": {
+    "deny": ["*"]
+  },'
+        print_warn "OpenClaw tools disabled (USE_OPENCLAW_TOOLS=false)"
+    fi
+
     cat > "$OPENCLAW_CONFIG" << EOF
 {
   "gateway": {
@@ -973,9 +983,7 @@ phase3_openclaw_install() {
       }
     }
   },
-  "tools": {
-    "deny": ["*"]
-  },
+  $TOOLS_BLOCK
   "plugins": {
     "allow": ["nextcloud-talk"]
   }
@@ -1078,6 +1086,11 @@ phase5_molt_tools() {
     
     # Create SKILL.md
     cat > "$OPENCLAW_WORKSPACE/skills/molt_tools/SKILL.md" << 'EOF'
+---
+name: molt_tools
+description: Moltbook integration (check status/DMs/feed and post updates).
+---
+
 # Moltbook Skill
 
 Tools for interacting with Moltbook social platform.
@@ -1285,6 +1298,7 @@ phase8_rag_setup() {
     RAG_ENABLED=true
     RAG_DOCS_DIR="$HOME/.openclaw/rag_documents"
     RAG_INSTALL_DIR="$HOME/.openclaw/rag"
+    RAG_DOCS_SOURCE_FILE="$RAG_INSTALL_DIR/.docs_source"
     
     # Install Python dependencies
     print_step "Installing RAG Python dependencies..."
@@ -1339,7 +1353,11 @@ phase8_rag_setup() {
     echo "Supported formats: PDF, TXT, MD, DOCX, etc."
     echo ""
     
-    DOC_SOURCE=$(prompt_input "Path to documents directory (leave empty to skip)" "")
+    DOC_SOURCE_DEFAULT=""
+    if [[ -f "$RAG_DOCS_SOURCE_FILE" ]]; then
+        DOC_SOURCE_DEFAULT=$(cat "$RAG_DOCS_SOURCE_FILE" 2>/dev/null || true)
+    fi
+    DOC_SOURCE=$(prompt_input "Path to documents directory (leave empty to skip)" "$DOC_SOURCE_DEFAULT")
     
     if [[ -n "$DOC_SOURCE" ]] && [[ -d "$DOC_SOURCE" ]]; then
         print_step "Copying documents from $DOC_SOURCE to $RAG_DOCS_DIR..."
@@ -1347,6 +1365,8 @@ phase8_rag_setup() {
         
         DOC_COUNT=$(find "$RAG_DOCS_DIR" -type f | wc -l)
         print_step "Copied $DOC_COUNT document(s) to $RAG_DOCS_DIR"
+        mkdir -p "$RAG_INSTALL_DIR"
+        echo "$DOC_SOURCE" > "$RAG_DOCS_SOURCE_FILE"
     elif [[ -n "$DOC_SOURCE" ]]; then
         print_warn "Directory not found: $DOC_SOURCE"
         print_warn "You can manually copy documents to $RAG_DOCS_DIR later."
@@ -1355,10 +1375,22 @@ phase8_rag_setup() {
     fi
     
     # Create environment file for RAG
+    RAG_DOCS_DIR_ENV="$RAG_DOCS_DIR"
+    if [[ -f "$RAG_DOCS_SOURCE_FILE" ]]; then
+        SAVED_DOC_SOURCE=$(cat "$RAG_DOCS_SOURCE_FILE" 2>/dev/null || true)
+        if [[ -n "$SAVED_DOC_SOURCE" ]]; then
+            RAG_DOCS_DIR_ENV="$SAVED_DOC_SOURCE"
+        fi
+    fi
     cat > "$RAG_INSTALL_DIR/.env" << EOF
 OLLAMA_BASE_URL=http://localhost:8000
 HAILO_MODEL=$HAILO_MODEL
-RAG_DATA_DIR=$RAG_DOCS_DIR
+RAG_DATA_DIR=$RAG_DOCS_DIR_ENV
+EMBEDDINGS_PROVIDER=local
+EMBEDDINGS_MODEL=sentence-transformers/all-MiniLM-L6-v2
+LLM_PROVIDER=openai
+OPENAI_API_BASE=http://127.0.0.1:8081/v1
+OPENAI_API_KEY=hailo-local
 EOF
     
     # Create convenience script

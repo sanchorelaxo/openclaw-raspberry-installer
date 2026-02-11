@@ -149,6 +149,9 @@ Choose between:
 - Pulls `nomic-embed-text` embedding model
 - Prompts for document directory to copy for local search
 - Creates convenience script for querying documents
+- Persists selected document directory to `~/.openclaw/rag/.docs_source`
+- Uses local embeddings (sentence-transformers) by default
+- Uses OpenAI-compatible proxy (`http://127.0.0.1:8081/v1`) for LLM calls
 
 ### Phase 9: Verification
 - Runs `openclaw doctor`

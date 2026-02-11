@@ -17,6 +17,8 @@ Listens on port 8081, forwards to hailo-ollama on port 8000.
 
 import http.server
 import json
+import os
+import re
 import sys
 import time
 import urllib.request
@@ -24,6 +26,9 @@ import urllib.error
 
 LISTEN_PORT = 8081
 UPSTREAM = "http://127.0.0.1:8000"
+WORKSPACE_SKILLS_DIR = os.path.expanduser("~/.openclaw/workspace/skills")
+SKILL_DETAIL_NAMES = {"molt_tools"}
+MAX_SKILL_DETAIL_CHARS = 2000
 UPSTREAM_TIMEOUT = 300  # seconds — generation is slow (~8 tok/s)
 
 MINIMAL_SYSTEM_PROMPT = (
@@ -35,9 +40,12 @@ MINIMAL_SYSTEM_PROMPT = (
 ALLOWED_CHAT_FIELDS = {
     "model", "messages", "temperature", "top_p", "n", "stream",
     "max_tokens", "max_completion_tokens", "presence_penalty",
-    "frequency_penalty", "seed",
+    "frequency_penalty", "seed", "tools", "tool_choice",
+    "parallel_tool_calls",
 }
-ALLOWED_MESSAGE_FIELDS = {"role", "content"}
+ALLOWED_MESSAGE_FIELDS = {
+    "role", "content", "tool_calls", "name", "tool_call_id"
+}
 
 
 def sanitize_chat_body(body_bytes):
@@ -50,6 +58,13 @@ def sanitize_chat_body(body_bytes):
         return body_bytes
 
     sanitized = {k: v for k, v in data.items() if k in ALLOWED_CHAT_FIELDS}
+    tools_payload = sanitized.pop("tools", None)
+    if tools_payload is not None:
+        try:
+            with open("/tmp/hailo-proxy-tools.json", "w", encoding="utf-8") as f:
+                json.dump(tools_payload, f, indent=2)
+        except Exception:
+            pass
 
     if "messages" in sanitized and isinstance(sanitized["messages"], list):
         clean_msgs = []
@@ -73,28 +88,187 @@ def sanitize_chat_body(body_bytes):
     sanitized["stream"] = False
 
     if "messages" in sanitized:
-        sanitized["messages"] = simplify_messages(sanitized["messages"])
+        tool_prompt = build_tool_prompt(tools_payload)
+        sanitized["messages"] = simplify_messages(sanitized["messages"], tool_prompt)
 
     return json.dumps(sanitized).encode("utf-8")
 
 
-def simplify_messages(messages):
+def simplify_messages(messages, tool_prompt=None):
     """Replace OpenClaw's massive system prompt with a minimal one."""
     if not messages:
         return messages
     other_msgs = [m for m in messages if m.get("role") != "system"]
     if len(other_msgs) > 4:
         other_msgs = other_msgs[-4:]
-    original_sys_len = sum(
-        len(m.get("content", "")) for m in messages if m.get("role") == "system"
-    )
+    original_sys_msgs = [m.get("content", "") for m in messages if m.get("role") == "system"]
+    original_sys_len = sum(len(c) for c in original_sys_msgs)
     if original_sys_len > len(MINIMAL_SYSTEM_PROMPT):
         sys.stderr.write(
             "hailo-sanitize-proxy: replaced system prompt (%d -> %d chars)\n"
             % (original_sys_len, len(MINIMAL_SYSTEM_PROMPT))
         )
         sys.stderr.flush()
-    return [{"role": "system", "content": MINIMAL_SYSTEM_PROMPT}] + other_msgs
+        if original_sys_msgs:
+            dump_path = "/tmp/hailo-proxy-system-prompt.txt"
+            try:
+                with open(dump_path, "w", encoding="utf-8") as f:
+                    f.write("\n\n".join(original_sys_msgs))
+            except Exception:
+                pass
+    system_content = MINIMAL_SYSTEM_PROMPT
+    skills_block = extract_skills_block("\n\n".join(original_sys_msgs))
+    if not skills_block:
+        skills_block = build_skills_block_from_workspace()
+    if tool_prompt:
+        system_content = f"{system_content}\n\n{tool_prompt}"
+    if skills_block:
+        system_content = f"{system_content}\n\nAvailable skills:\n{skills_block}"
+    skill_details = build_skill_details_from_workspace()
+    if skill_details:
+        system_content = f"{system_content}\n\n{skill_details}"
+    try:
+        with open("/tmp/hailo-proxy-sanitized-system-prompt.txt", "w", encoding="utf-8") as f:
+            f.write(system_content)
+    except Exception:
+        pass
+    return [{"role": "system", "content": system_content}] + other_msgs
+
+
+def build_tool_prompt(tools_payload):
+    if not tools_payload or not isinstance(tools_payload, list):
+        return ""
+    lines = [
+        "Tool usage:",
+        "- If a tool is needed, respond ONLY with JSON:",
+        '  {"tool": "<name>", "arguments": { ... }}',
+        "- Otherwise, respond normally.",
+        "Available tools:",
+    ]
+    for tool in tools_payload:
+        if not isinstance(tool, dict):
+            continue
+        if tool.get("type") != "function":
+            continue
+        fn = tool.get("function", {})
+        name = fn.get("name")
+        if not name:
+            continue
+        desc = fn.get("description", "").strip().replace("\n", " ")
+        params = fn.get("parameters", {})
+        props = params.get("properties", {}) if isinstance(params, dict) else {}
+        args = ", ".join(sorted(props.keys())) if isinstance(props, dict) else ""
+        label = f"- {name}"
+        if desc:
+            label += f": {desc}"
+        if args:
+            label += f" (args: {args})"
+        lines.append(label)
+    return "\n".join(lines)
+
+
+def extract_skills_block(system_text):
+    if not system_text:
+        return ""
+    match = re.search(r"<available_skills>(.*?)</available_skills>", system_text, re.DOTALL)
+    if not match:
+        return ""
+    block = match.group(1).strip()
+    if not block:
+        return ""
+    return block
+
+
+def build_skills_block_from_workspace():
+    if not os.path.isdir(WORKSPACE_SKILLS_DIR):
+        return ""
+    skills = []
+    for entry in sorted(os.listdir(WORKSPACE_SKILLS_DIR)):
+        skill_dir = os.path.join(WORKSPACE_SKILLS_DIR, entry)
+        skill_md = os.path.join(skill_dir, "SKILL.md")
+        if not os.path.isfile(skill_md):
+            continue
+        name = None
+        desc = ""
+        try:
+            with open(skill_md, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+            if lines and lines[0].strip() == "---":
+                for line in lines[1:]:
+                    if line.strip() == "---":
+                        break
+                    if line.startswith("name:"):
+                        name = line.split(":", 1)[1].strip()
+                    elif line.startswith("description:"):
+                        desc = line.split(":", 1)[1].strip()
+        except Exception:
+            continue
+        if not name:
+            name = entry
+        skills.append({
+            "name": name,
+            "description": desc,
+            "location": skill_md,
+        })
+    if not skills:
+        return ""
+    parts = ["<available_skills>"]
+    for skill in skills:
+        parts.append("  <skill>")
+        parts.append(f"    <name>{skill['name']}</name>")
+        if skill["description"]:
+            parts.append(f"    <description>{skill['description']}</description>")
+        parts.append(f"    <location>{skill['location']}</location>")
+        parts.append("  </skill>")
+    parts.append("</available_skills>")
+    return "\n".join(parts)
+
+
+def build_skill_details_from_workspace():
+    if not os.path.isdir(WORKSPACE_SKILLS_DIR):
+        return ""
+    sections = []
+    for entry in sorted(os.listdir(WORKSPACE_SKILLS_DIR)):
+        if entry not in SKILL_DETAIL_NAMES:
+            continue
+        skill_md = os.path.join(WORKSPACE_SKILLS_DIR, entry, "SKILL.md")
+        if not os.path.isfile(skill_md):
+            continue
+        try:
+            with open(skill_md, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+        except Exception:
+            continue
+        if not content:
+            continue
+        if len(content) > MAX_SKILL_DETAIL_CHARS:
+            content = content[:MAX_SKILL_DETAIL_CHARS].rstrip() + "\n..."
+        sections.append(f"## Skill: {entry}\n{content}")
+    if not sections:
+        return ""
+    return "Skill details (use exec to run scripts as described):\n" + "\n\n".join(sections)
+
+
+def parse_tool_call(content):
+    if not content or not isinstance(content, str):
+        return None
+    raw = content.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        raw = raw.replace("json", "", 1).strip()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    name = payload.get("tool") or payload.get("name") or payload.get("tool_name")
+    args = payload.get("arguments") or payload.get("args") or {}
+    if not name:
+        return None
+    if not isinstance(args, dict):
+        return None
+    return {"name": name, "arguments": args}
 
 
 def sanitize_response(data):
@@ -122,12 +296,25 @@ def sanitize_response(data):
             choice.setdefault("logprobs", None)
             msg = choice.get("message", {})
             content = msg.get("content", "")
+            tool_call = parse_tool_call(content)
             total_chars += len(content)
             choice["message"] = {
                 "role": msg.get("role", "assistant"),
                 "content": content,
                 "refusal": None,
             }
+            if tool_call:
+                choice["message"]["content"] = ""
+                choice["message"]["tool_calls"] = [
+                    {
+                        "id": f"call_{int(time.time() * 1000)}",
+                        "type": "function",
+                        "function": {
+                            "name": tool_call["name"],
+                            "arguments": json.dumps(tool_call["arguments"]),
+                        },
+                    }
+                ]
 
     if "usage" not in resp:
         est_tokens = max(1, total_chars // 4)
@@ -153,8 +340,11 @@ def to_sse(data):
     fp = resp.get("system_fingerprint", "hailo-ollama")
     usage = resp.get("usage", {})
     content = ""
+    tool_calls = None
     if resp.get("choices"):
-        content = resp["choices"][0].get("message", {}).get("content", "")
+        msg = resp["choices"][0].get("message", {})
+        content = msg.get("content", "")
+        tool_calls = msg.get("tool_calls")
 
     parts = []
     # role chunk
@@ -164,8 +354,16 @@ def to_sse(data):
         "choices": [{"index": 0, "delta": {"role": "assistant", "content": "", "refusal": None},
                      "logprobs": None, "finish_reason": None}],
     }))
+    # tool call chunk
+    if tool_calls:
+        parts.append("data: %s\n\n" % json.dumps({
+            "id": cid, "object": "chat.completion.chunk", "created": created,
+            "model": model, "system_fingerprint": fp,
+            "choices": [{"index": 0, "delta": {"tool_calls": tool_calls},
+                         "logprobs": None, "finish_reason": None}],
+        }))
     # content chunk
-    if content:
+    if content and not tool_calls:
         parts.append("data: %s\n\n" % json.dumps({
             "id": cid, "object": "chat.completion.chunk", "created": created,
             "model": model, "system_fingerprint": fp,
@@ -181,6 +379,41 @@ def to_sse(data):
     }))
     parts.append("data: [DONE]\n\n")
     return "".join(parts).encode("utf-8")
+
+
+def convert_chat_to_completion(data):
+    try:
+        resp = json.loads(data)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return data
+    if not isinstance(resp, dict):
+        return data
+    choice = None
+    if resp.get("choices"):
+        choice = resp["choices"][0]
+    text = ""
+    finish_reason = None
+    if choice:
+        msg = choice.get("message", {})
+        text = msg.get("content", "") or ""
+        finish_reason = choice.get("finish_reason")
+    completion = {
+        "id": resp.get("id", "cmpl-0"),
+        "object": "text_completion",
+        "created": resp.get("created", int(time.time())),
+        "model": resp.get("model", "unknown"),
+        "choices": [
+            {
+                "index": 0,
+                "text": text,
+                "logprobs": None,
+                "finish_reason": finish_reason or "stop",
+            }
+        ],
+    }
+    if "usage" in resp:
+        completion["usage"] = resp["usage"]
+    return json.dumps(completion).encode("utf-8")
 
 
 def fake_api_show(body_bytes):
@@ -226,7 +459,26 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # Detect streaming + sanitize for chat completions
         client_wants_stream = False
         is_chat = path == "/v1/chat/completions" and method == "POST"
+        is_completion = path == "/v1/completions" and method == "POST"
         original_body = body
+        if is_completion and body:
+            try:
+                payload = json.loads(body)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                payload = None
+            if isinstance(payload, dict):
+                prompt = payload.get("prompt", "")
+                model = payload.get("model")
+                chat_payload = {
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt or ""}],
+                    "temperature": payload.get("temperature"),
+                    "top_p": payload.get("top_p"),
+                    "max_tokens": payload.get("max_tokens"),
+                    "stream": False,
+                }
+                body = json.dumps(chat_payload).encode("utf-8")
+                is_chat = True
         if is_chat and body:
             try:
                 client_wants_stream = json.loads(body).get("stream", False)
@@ -234,7 +486,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 pass
             body = sanitize_chat_body(body)
 
-        url = "%s%s" % (UPSTREAM, self.path)
+        upstream_path = "/v1/chat/completions" if is_completion else self.path
+        url = "%s%s" % (UPSTREAM, upstream_path)
         req = urllib.request.Request(url, data=body if body else None, method=method)
         for header in self.headers:
             lower = header.lower()
@@ -249,20 +502,19 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
             if is_chat:
                 data = sanitize_response(data)
+            if is_completion:
+                data = convert_chat_to_completion(data)
 
-            if is_chat and client_wants_stream:
+            if is_chat and client_wants_stream and not is_completion:
                 sse_data = to_sse(data)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
                 self.send_header("Connection", "keep-alive")
                 self.send_header("Content-Length", str(len(sse_data)))
-                self.end_headers()
-                self.wfile.write(sse_data)
-                self.wfile.flush()
                 sys.stderr.write(
-                    "hailo-sanitize-proxy: %s %s -> 200 SSE (%d bytes)\n"
-                    % (method, path, len(sse_data))
+                    "hailo-sanitize-proxy: %s %s -> %d SSE (%d bytes)\n"
+                    % (method, path, resp.status, len(sse_data))
                 )
             else:
                 self._send_json(resp.status, data)
