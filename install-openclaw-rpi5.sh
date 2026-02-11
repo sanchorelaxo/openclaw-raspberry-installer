@@ -21,6 +21,7 @@ OFFLINE_DIR="$SCRIPT_DIR/offline_bundle"
 # Parse arguments
 OFFLINE_MODE=false
 PREPARE_OFFLINE=false
+USE_SANITIZER_PROXY_ON_OLLAMA=${USE_SANITIZER_PROXY_ON_OLLAMA:-true}
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -795,7 +796,7 @@ EOF
     # Store selected model for later use in config
     HAILO_MODEL="$SELECTED_MODEL"
     
-    # --- Install the sanitizing proxy ---
+    # --- Install the sanitizing proxy (optional) ---
     # hailo-ollama's oatpp framework crashes on fields OpenClaw sends (tools,
     # stream_options, store) and its /api/show DTO is buggy. The proxy:
     #   - Strips unsupported request fields
@@ -803,17 +804,18 @@ EOF
     #   - Converts non-streaming response to SSE for OpenClaw's SDK
     #   - Fixes nanosecond timestamps and missing usage fields
     #   - Fakes /api/show to avoid DTO crash
-    print_step "Installing hailo-ollama sanitizing proxy..."
-    
-    PROXY_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hailo-sanitize-proxy.py"
-    if [[ ! -f "$PROXY_SRC" ]]; then
-        print_error "hailo-sanitize-proxy.py not found alongside installer"
-        print_warn "Expected at: $PROXY_SRC"
-    else
-        sudo cp "$PROXY_SRC" /usr/local/bin/hailo-sanitize-proxy.py
-        sudo chmod +x /usr/local/bin/hailo-sanitize-proxy.py
+    if [[ "$USE_SANITIZER_PROXY_ON_OLLAMA" == "true" ]]; then
+        print_step "Installing hailo-ollama sanitizing proxy..."
         
-        sudo tee /etc/systemd/system/hailo-sanitize-proxy.service > /dev/null << 'EOF'
+        PROXY_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hailo-sanitize-proxy.py"
+        if [[ ! -f "$PROXY_SRC" ]]; then
+            print_error "hailo-sanitize-proxy.py not found alongside installer"
+            print_warn "Expected at: $PROXY_SRC"
+        else
+            sudo cp "$PROXY_SRC" /usr/local/bin/hailo-sanitize-proxy.py
+            sudo chmod +x /usr/local/bin/hailo-sanitize-proxy.py
+            
+            sudo tee /etc/systemd/system/hailo-sanitize-proxy.service > /dev/null << 'EOF'
 [Unit]
 Description=Hailo-Ollama Sanitizing Proxy
 After=hailo-ollama.service
@@ -828,18 +830,21 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 EOF
-        
-        sudo systemctl daemon-reload
-        sudo systemctl enable hailo-sanitize-proxy.service
-        sudo systemctl start hailo-sanitize-proxy.service
-        
-        # Verify proxy is running
-        sleep 2
-        if curl -s http://127.0.0.1:8081/api/tags &>/dev/null; then
-            print_step "Sanitizing proxy running on port 8081"
-        else
-            print_warn "Sanitizing proxy may not have started — check: journalctl -u hailo-sanitize-proxy"
+            
+            sudo systemctl daemon-reload
+            sudo systemctl enable hailo-sanitize-proxy.service
+            sudo systemctl start hailo-sanitize-proxy.service
+            
+            # Verify proxy is running
+            sleep 2
+            if curl -s http://127.0.0.1:8081/api/tags &>/dev/null; then
+                print_step "Sanitizing proxy running on port 8081"
+            else
+                print_warn "Sanitizing proxy may not have started — check: journalctl -u hailo-sanitize-proxy"
+            fi
         fi
+    else
+        print_warn "Skipping sanitizing proxy (USE_SANITIZER_PROXY_ON_OLLAMA=false)"
     fi
     
     print_step "Hailo GenAI stack configured with $SELECTED_MODEL"
@@ -909,14 +914,15 @@ phase3_openclaw_install() {
     unset OLLAMA_API_KEY 2>/dev/null || true
     
     # Convert model name for ollama provider format (e.g., qwen2:1.5b -> ollama/qwen2:1.5b)
-    # We use the sanitizing proxy on port 8081 which handles:
-    # - Stripping unsupported fields (tools, stream_options, store)
-    # - Replacing massive system prompt with minimal one (2048-token context)
-    # - Converting non-streaming response to SSE for OpenClaw's SDK
-    # - Fixing nanosecond timestamps and missing usage fields
-    # - Faking /api/show to avoid hailo-ollama DTO crash
+    # If USE_SANITIZER_PROXY_ON_OLLAMA=true, we route through the proxy on port 8081.
     HAILO_PROVIDER_MODEL="ollama/${HAILO_MODEL:-qwen2:1.5b}"
     MODEL_ID="${HAILO_MODEL:-qwen2:1.5b}"
+    if [[ "$USE_SANITIZER_PROXY_ON_OLLAMA" == "true" ]]; then
+        MODEL_BASE_URL="http://127.0.0.1:8081/v1"
+    else
+        MODEL_BASE_URL="http://127.0.0.1:8000/v1"
+        print_warn "Sanitizing proxy disabled; OpenClaw will call hailo-ollama directly"
+    fi
     
     # Use explicit provider config with /v1/chat/completions via sanitizing proxy.
     # The proxy (port 8081) sits between OpenClaw and hailo-ollama (port 8000).
@@ -930,7 +936,7 @@ phase3_openclaw_install() {
   "models": {
     "providers": {
       "ollama": {
-        "baseUrl": "http://127.0.0.1:8081/v1",
+        "baseUrl": "$MODEL_BASE_URL",
         "apiKey": "hailo-local",
         "api": "openai-completions",
         "models": [

@@ -94,7 +94,7 @@ cd ~/openclaw-raspberry-installer
 - Creates **systemd service** (`hailo-ollama.service`) so the server starts on boot
   - hailo-ollama is an Ollama-compatible REST API on **port 8000** (not actual Ollama)
   - Must be running before OpenClaw or any client can use it
-- Installs **sanitizing proxy** (`hailo-sanitize-proxy.service`) on **port 8081**
+- Installs **sanitizing proxy** (`hailo-sanitize-proxy.service`) on **port 8081** (optional)
   - Strips unsupported request fields that crash hailo-ollama's oatpp DTOs
   - Replaces OpenClaw's massive system prompt with a minimal one (2048-token context)
   - Converts non-streaming responses to SSE format for OpenClaw's SDK
@@ -112,7 +112,7 @@ cd ~/openclaw-raspberry-installer
 - Installs OpenClaw CLI
 - Runs onboarding wizard
 - Removes `OLLAMA_API_KEY` to disable auto-discovery (which probes buggy `/api/show`)
-- Configures **explicit** Ollama provider pointing to sanitizing proxy on **port 8081**
+- Configures **explicit** Ollama provider pointing to sanitizing proxy on **port 8081** (if enabled)
   - Uses `api: "openai-completions"` with `/v1/chat/completions` endpoint
   - Model definitions advertise `contextWindow: 16000` (OpenClaw minimum; real is 2048)
   - All tools denied (`tools.deny: ["*"]`) — 1.5B models can't handle tool calls
@@ -154,6 +154,18 @@ Choose between:
 - Runs `openclaw doctor`
 - Runs `openclaw status --all`
 - Runs `openclaw health`
+
+### Feature flag: USE_SANITIZER_PROXY_ON_OLLAMA
+The installer supports an environment flag to disable the sanitizing proxy
+and point OpenClaw directly at hailo-ollama (port 8000).
+
+```bash
+# Default (recommended): use the sanitizing proxy on port 8081
+USE_SANITIZER_PROXY_ON_OLLAMA=true ./install-openclaw-rpi5.sh
+
+# Disable proxy (not recommended unless testing)
+USE_SANITIZER_PROXY_ON_OLLAMA=false ./install-openclaw-rpi5.sh
+```
 
 ## First Boot Task
 
