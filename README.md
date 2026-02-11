@@ -284,7 +284,7 @@ curl http://localhost:8000/api/tags     # Direct to hailo-ollama
 curl http://localhost:8081/api/tags     # Through proxy
 # Check OpenClaw config points to proxy
 cat ~/.openclaw/openclaw.json | grep baseUrl
-# Should show: http://localhost:8081/v1
+# Should show: http://127.0.0.1:8081/v1
 ```
 
 ### Sanitizing proxy issues

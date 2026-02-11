@@ -226,6 +226,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # Detect streaming + sanitize for chat completions
         client_wants_stream = False
         is_chat = path == "/v1/chat/completions" and method == "POST"
+        original_body = body
         if is_chat and body:
             try:
                 client_wants_stream = json.loads(body).get("stream", False)
@@ -272,6 +273,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             sys.stderr.flush()
         except urllib.error.HTTPError as e:
             err_data = e.read()
+            if is_chat and e.code == 500:
+                try:
+                    ts = int(time.time())
+                    with open(f"/tmp/hailo-proxy-500-raw-{ts}.json", "wb") as f:
+                        f.write(original_body or b"")
+                    with open(f"/tmp/hailo-proxy-500-sanitized-{ts}.json", "wb") as f:
+                        f.write(body or b"")
+                except Exception:
+                    pass
             self.send_response(e.code)
             for h, v in e.headers.items():
                 if h.lower() not in ("transfer-encoding",):

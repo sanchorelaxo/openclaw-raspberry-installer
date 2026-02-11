@@ -930,7 +930,7 @@ phase3_openclaw_install() {
   "models": {
     "providers": {
       "ollama": {
-        "baseUrl": "http://localhost:8081/v1",
+        "baseUrl": "http://127.0.0.1:8081/v1",
         "apiKey": "hailo-local",
         "api": "openai-completions",
         "models": [
