@@ -974,7 +974,8 @@ phase3_openclaw_install() {
         }
       },
       "sandbox": {
-        "mode": "all"
+        "mode": "workspace",
+        "rootPath": "~/.openclaw/workspace"
       },
       "heartbeat": {
         "every": "4h",
