@@ -71,8 +71,13 @@ TOOL_INTENT_TOKENS = (
     " use ", " tool", "skill", "/rag", "rag ", "molt", "run ", "execute"
 )
 
-# Internal OpenClaw tools the 1.5B model can't invoke correctly — suppress these.
+# Tools the 1.5B model can't invoke correctly — suppress these.
+# File tools: model generates absolute paths outside sandbox → always fails.
+# Session tools: model can't format array arguments correctly.
+# Search/process: model loops endlessly on these.
+# Only "exec" is allowed through (proxy can normalize the command).
 BLOCKED_TOOL_NAMES = {
+    "read", "write", "edit", "search", "process",
     "sessions_list", "sessions_history", "sessions_send",
     "sessions_spawn", "session_status",
 }
