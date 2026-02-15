@@ -1,0 +1,1150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Unified Chat Facade</title>
+  <link rel="icon" href="data:,">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0f1115;
+      --panel: #181c23;
+      --panel-2: #202734;
+      --text: #e8eefc;
+      --muted: #9eacc8;
+      --accent: #57a6ff;
+      --ok: #4ec981;
+      --warn: #ffbf5d;
+      --err: #ff6b6b;
+      --border: #2a3342;
+    }
+
+    * {
+      box-sizing: border-box;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    body {
+      margin: 0;
+      background: radial-gradient(1200px 700px at 20% -10%, #1f2d4f 0%, transparent 45%), var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 1rem;
+    }
+
+    .app {
+      width: min(1100px, 100%);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 25%), var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+      display: grid;
+      grid-template-columns: 340px 1fr;
+      min-height: 80vh;
+    }
+
+    .left {
+      border-right: 1px solid var(--border);
+      background: var(--panel-2);
+      padding: 1rem;
+      overflow: auto;
+    }
+
+    .right {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      min-height: 0;
+    }
+
+    h1 {
+      font-size: 1rem;
+      margin: 0 0 0.75rem;
+      letter-spacing: 0.02em;
+      color: #f5f8ff;
+    }
+
+    .sub {
+      color: var(--muted);
+      font-size: 0.83rem;
+      margin-bottom: 1rem;
+      line-height: 1.35;
+    }
+
+    .mode-group {
+      display: grid;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+    }
+
+    .mode {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.6rem 0.7rem;
+      cursor: pointer;
+      display: grid;
+      gap: 0.2rem;
+      background: rgba(255, 255, 255, 0.01);
+    }
+
+    .mode.active {
+      border-color: var(--accent);
+      background: rgba(87, 166, 255, 0.12);
+    }
+
+    .mode strong {
+      font-size: 0.9rem;
+    }
+
+    .mode small {
+      color: var(--muted);
+      font-size: 0.75rem;
+    }
+
+    details {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.5rem;
+      margin-bottom: 0.75rem;
+      background: rgba(255, 255, 255, 0.01);
+    }
+
+    summary {
+      cursor: pointer;
+      font-size: 0.84rem;
+      color: var(--muted);
+      margin-bottom: 0.5rem;
+      user-select: none;
+    }
+
+    .field {
+      display: grid;
+      gap: 0.3rem;
+      margin-bottom: 0.55rem;
+    }
+
+    label {
+      font-size: 0.73rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    input {
+      width: 100%;
+      background: #10161f;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.55rem 0.6rem;
+      font-size: 0.85rem;
+    }
+
+    .row {
+      display: flex;
+      gap: 0.5rem;
+    }
+
+    button {
+      border: 1px solid var(--border);
+      background: #1c2431;
+      color: var(--text);
+      border-radius: 8px;
+      padding: 0.55rem 0.7rem;
+      font-size: 0.83rem;
+      cursor: pointer;
+    }
+
+    button.primary {
+      background: #1952a6;
+      border-color: #2a67c2;
+    }
+
+    .statusbar {
+      display: flex;
+      gap: 0.7rem;
+      align-items: center;
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.8rem;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.01);
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      display: inline-block;
+      margin-right: 0.4rem;
+      background: var(--warn);
+    }
+
+    .dot.ok {
+      background: var(--ok);
+    }
+
+    .dot.err {
+      background: var(--err);
+    }
+
+    .messages {
+      padding: 1rem;
+      overflow: auto;
+      min-height: 0;
+      display: grid;
+      align-content: start;
+      gap: 0.75rem;
+    }
+
+    .msg {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.65rem 0.75rem;
+      max-width: 90%;
+      white-space: pre-wrap;
+      line-height: 1.35;
+      font-size: 0.9rem;
+    }
+
+    .msg.user {
+      justify-self: end;
+      background: rgba(53, 94, 168, 0.35);
+      border-color: #355ea8;
+    }
+
+    .msg.assistant {
+      justify-self: start;
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .msg.system {
+      justify-self: center;
+      color: var(--muted);
+      font-size: 0.8rem;
+      background: rgba(255, 255, 255, 0.01);
+      border-style: dashed;
+    }
+
+    .composer {
+      border-top: 1px solid var(--border);
+      padding: 0.75rem;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 0.5rem;
+      background: rgba(255, 255, 255, 0.01);
+    }
+
+    .composer input {
+      font-size: 0.9rem;
+    }
+
+    .hint {
+      font-size: 0.74rem;
+      color: var(--muted);
+      margin-top: 0.4rem;
+      line-height: 1.3;
+    }
+
+    @media (max-width: 980px) {
+      .app {
+        grid-template-columns: 1fr;
+      }
+      .left {
+        border-right: 0;
+        border-bottom: 1px solid var(--border);
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <aside class="left">
+      <h1>Unified Chat Facade</h1>
+      <div class="sub">
+        One chat field, three backends. Toggle between OpenClaw Dashboard chat,
+        OpenClaw WebChat session, and Ollama/Hailo chat.
+      </div>
+
+      <div id="modeGroup" class="mode-group"></div>
+
+      <details open>
+        <summary>OpenClaw Gateway settings</summary>
+        <div class="field">
+          <label for="gatewayUrl">Gateway WS URL</label>
+          <input id="gatewayUrl" placeholder="ws://127.0.0.1:18789">
+        </div>
+        <div class="field">
+          <label for="gatewayToken">Gateway token (optional)</label>
+          <input id="gatewayToken" type="password" placeholder="token from gateway.auth.token">
+        </div>
+        <div class="field">
+          <label for="gatewayPassword">Gateway password (optional)</label>
+          <input id="gatewayPassword" type="password" placeholder="gateway auth password">
+        </div>
+        <div class="field">
+          <label for="gatewayTokenProvider">Dynamic token URL (optional)</label>
+          <input id="gatewayTokenProvider" placeholder="https://host/internal/openclaw-token">
+        </div>
+        <div class="field">
+          <label for="dashboardSessionKey">Dashboard session key</label>
+          <input id="dashboardSessionKey" placeholder="webchat:dashboard">
+        </div>
+        <div class="field">
+          <label for="webchatSessionKey">WebChat session key</label>
+          <input id="webchatSessionKey" placeholder="webchat:mobile">
+        </div>
+      </details>
+
+      <details>
+        <summary>Ollama / Hailo settings</summary>
+        <div class="field">
+          <label for="ollamaUrl">Chat endpoint</label>
+          <input id="ollamaUrl" placeholder="http://127.0.0.1:8081/v1/chat/completions">
+        </div>
+        <div class="field">
+          <label for="ollamaModel">Model</label>
+          <input id="ollamaModel" placeholder="qwen2.5:1.5b">
+        </div>
+        <div class="field">
+          <label for="ollamaToken">Bearer token (optional)</label>
+          <input id="ollamaToken" type="password" placeholder="only if your endpoint requires auth">
+        </div>
+        <div class="field">
+          <label for="ollamaTokenProvider">Dynamic token URL (optional)</label>
+          <input id="ollamaTokenProvider" placeholder="https://host/internal/ollama-token">
+        </div>
+      </details>
+
+      <div class="row">
+        <button id="saveBtn" class="primary">Save settings</button>
+        <button id="disconnectBtn">Disconnect WS</button>
+      </div>
+
+      <div class="hint">
+        If OpenClaw rejects WebSocket origin, add your facade origin to
+        <code>gateway.controlUi.allowedOrigins</code>.
+      </div>
+    </aside>
+
+    <section class="right">
+      <div class="statusbar">
+        <span><span id="wsDot" class="dot"></span><span id="wsStatus">Gateway: disconnected</span></span>
+        <span id="activeModeLabel">| Mode: -</span>
+      </div>
+      <div id="messages" class="messages"></div>
+      <div class="composer">
+        <input id="composerInput" placeholder="Type a message and press Enter...">
+        <button id="sendBtn" class="primary">Send</button>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const MODELS = [
+      {
+        id: "openclaw-dashboard",
+        title: "OpenClaw Dashboard",
+        subtitle: "Gateway chat session (dashboard profile)",
+        kind: "openclaw",
+      },
+      {
+        id: "openclaw-webchat",
+        title: "OpenClaw WebChat",
+        subtitle: "Gateway chat session (webchat profile)",
+        kind: "openclaw",
+      },
+      {
+        id: "ollama",
+        title: "Ollama / Hailo",
+        subtitle: "OpenAI-compatible chat endpoint",
+        kind: "ollama",
+      },
+    ];
+
+    const SETTINGS_KEY = "unifiedChatFacade.settings.v1";
+    const DEVICE_IDENTITY_KEY = "unifiedChatFacade.deviceIdentity.v1";
+    const textEncoder = new TextEncoder();
+
+    const defaultSettings = {
+      gatewayUrl: "ws://127.0.0.1:18789",
+      gatewayToken: "",
+      gatewayPassword: "",
+      gatewayTokenProvider: "",
+      dashboardSessionKey: "webchat:dashboard",
+      webchatSessionKey: "webchat:mobile",
+      ollamaUrl: "http://127.0.0.1:8081/v1/chat/completions",
+      ollamaModel: "qwen2.5:1.5b",
+      ollamaToken: "",
+      ollamaTokenProvider: "",
+      activeMode: "openclaw-dashboard",
+    };
+
+    const state = {
+      settings: loadSettings(),
+      ws: null,
+      wsReady: false,
+      wsConnectPromise: null,
+      pending: new Map(),
+      pendingRunText: new Map(),
+      conversations: {
+        "openclaw-dashboard": [],
+        "openclaw-webchat": [],
+        "ollama": [],
+      },
+      activeMode: null,
+    };
+
+    const els = {
+      modeGroup: document.getElementById("modeGroup"),
+      messages: document.getElementById("messages"),
+      composerInput: document.getElementById("composerInput"),
+      sendBtn: document.getElementById("sendBtn"),
+      saveBtn: document.getElementById("saveBtn"),
+      disconnectBtn: document.getElementById("disconnectBtn"),
+      wsDot: document.getElementById("wsDot"),
+      wsStatus: document.getElementById("wsStatus"),
+      activeModeLabel: document.getElementById("activeModeLabel"),
+      gatewayUrl: document.getElementById("gatewayUrl"),
+      gatewayToken: document.getElementById("gatewayToken"),
+      gatewayPassword: document.getElementById("gatewayPassword"),
+      gatewayTokenProvider: document.getElementById("gatewayTokenProvider"),
+      dashboardSessionKey: document.getElementById("dashboardSessionKey"),
+      webchatSessionKey: document.getElementById("webchatSessionKey"),
+      ollamaUrl: document.getElementById("ollamaUrl"),
+      ollamaModel: document.getElementById("ollamaModel"),
+      ollamaToken: document.getElementById("ollamaToken"),
+      ollamaTokenProvider: document.getElementById("ollamaTokenProvider"),
+    };
+
+    function loadSettings() {
+      try {
+        const raw = localStorage.getItem(SETTINGS_KEY);
+        if (!raw) return { ...defaultSettings };
+        return { ...defaultSettings, ...JSON.parse(raw) };
+      } catch {
+        return { ...defaultSettings };
+      }
+    }
+
+    function saveSettings() {
+      state.settings = {
+        gatewayUrl: els.gatewayUrl.value.trim(),
+        gatewayToken: els.gatewayToken.value,
+        gatewayPassword: els.gatewayPassword.value,
+        gatewayTokenProvider: els.gatewayTokenProvider.value.trim(),
+        dashboardSessionKey: els.dashboardSessionKey.value.trim(),
+        webchatSessionKey: els.webchatSessionKey.value.trim(),
+        ollamaUrl: els.ollamaUrl.value.trim(),
+        ollamaModel: els.ollamaModel.value.trim(),
+        ollamaToken: els.ollamaToken.value,
+        ollamaTokenProvider: els.ollamaTokenProvider.value.trim(),
+        activeMode: state.activeMode || defaultSettings.activeMode,
+      };
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(state.settings));
+      appendSystem("Settings saved");
+    }
+
+    function applySettingsToUi() {
+      els.gatewayUrl.value = state.settings.gatewayUrl;
+      els.gatewayToken.value = state.settings.gatewayToken;
+      els.gatewayPassword.value = state.settings.gatewayPassword;
+      els.gatewayTokenProvider.value = state.settings.gatewayTokenProvider;
+      els.dashboardSessionKey.value = state.settings.dashboardSessionKey;
+      els.webchatSessionKey.value = state.settings.webchatSessionKey;
+      els.ollamaUrl.value = state.settings.ollamaUrl;
+      els.ollamaModel.value = state.settings.ollamaModel;
+      els.ollamaToken.value = state.settings.ollamaToken;
+      els.ollamaTokenProvider.value = state.settings.ollamaTokenProvider;
+    }
+
+    function modeById(id) {
+      return MODELS.find((m) => m.id === id) || MODELS[0];
+    }
+
+    function sessionKeyForMode(modeId) {
+      if (modeId === "openclaw-dashboard") {
+        return state.settings.dashboardSessionKey || defaultSettings.dashboardSessionKey;
+      }
+      if (modeId === "openclaw-webchat") {
+        return state.settings.webchatSessionKey || defaultSettings.webchatSessionKey;
+      }
+      return "";
+    }
+
+    function appendMessage(role, text, modeId) {
+      state.conversations[modeId].push({ role, text });
+      if (modeId === state.activeMode) {
+        renderMessages(modeId);
+      }
+    }
+
+    function appendSystem(text) {
+      const div = document.createElement("div");
+      div.className = "msg system";
+      div.textContent = text;
+      els.messages.appendChild(div);
+      els.messages.scrollTop = els.messages.scrollHeight;
+    }
+
+    function renderMessages(modeId) {
+      els.messages.innerHTML = "";
+      for (const item of state.conversations[modeId]) {
+        const div = document.createElement("div");
+        div.className = `msg ${item.role}`;
+        div.textContent = item.text;
+        els.messages.appendChild(div);
+      }
+      els.messages.scrollTop = els.messages.scrollHeight;
+    }
+
+    function updateWsStatus(kind, text) {
+      els.wsDot.classList.remove("ok", "err");
+      if (kind === "ok") {
+        els.wsDot.classList.add("ok");
+      }
+      if (kind === "err") {
+        els.wsDot.classList.add("err");
+      }
+      els.wsStatus.textContent = text;
+    }
+
+    function explainGatewayError(err) {
+      const base = err && err.message ? String(err.message) : String(err || "Gateway error");
+      const lower = base.toLowerCase();
+      if (lower.includes("device identity required") || lower.includes("gateway token missing") || lower.includes("token missing")) {
+        return `${base}. Set the Gateway token in the left panel (or use Dynamic token URL), then click Save settings.`;
+      }
+      if (lower.includes("origin not allowed")) {
+        return `${base}. Add this facade origin to gateway.controlUi.allowedOrigins and restart the gateway.`;
+      }
+      if (lower.includes("invalid role")) {
+        return `${base}. Refresh the page to load the latest facade build.`;
+      }
+      return base;
+    }
+
+    function extractMessageText(msg) {
+      if (!msg) return "";
+      if (typeof msg === "string") return msg;
+      if (Array.isArray(msg.content)) {
+        return msg.content
+          .map((part) => {
+            if (typeof part === "string") return part;
+            if (part && typeof part.text === "string") return part.text;
+            return "";
+          })
+          .join("")
+          .trim();
+      }
+      if (msg.content && typeof msg.content === "string") {
+        return msg.content;
+      }
+      return "";
+    }
+
+    async function resolveDynamicSecret(staticValue, providerUrl) {
+      if (providerUrl) {
+        const res = await fetch(providerUrl, { cache: "no-store" });
+        if (!res.ok) {
+          throw new Error(`Token provider failed (${res.status})`);
+        }
+        const payload = await res.json();
+        if (typeof payload === "string") return payload;
+        if (payload && typeof payload.token === "string") return payload.token;
+        if (payload && typeof payload.value === "string") return payload.value;
+        throw new Error("Token provider did not return token/value string");
+      }
+      return staticValue || "";
+    }
+
+    function bytesToBase64Url(bytes) {
+      let binary = "";
+      for (const b of bytes) {
+        binary += String.fromCharCode(b);
+      }
+      return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+    }
+
+    async function sha256Hex(bytes) {
+      const digest = await crypto.subtle.digest("SHA-256", bytes);
+      const arr = new Uint8Array(digest);
+      return Array.from(arr).map((b) => b.toString(16).padStart(2, "0")).join("");
+    }
+
+    async function loadOrCreateDeviceIdentity() {
+      const tryLoadStored = async () => {
+        const raw = localStorage.getItem(DEVICE_IDENTITY_KEY);
+        if (!raw) {
+          return null;
+        }
+        let parsed;
+        try {
+          parsed = JSON.parse(raw);
+        } catch {
+          return null;
+        }
+        if (!parsed || typeof parsed !== "object") {
+          return null;
+        }
+        if (!parsed.publicJwk || !parsed.privateJwk) {
+          return null;
+        }
+        try {
+          const publicKey = await crypto.subtle.importKey(
+            "jwk",
+            parsed.publicJwk,
+            { name: "Ed25519" },
+            true,
+            ["verify"],
+          );
+          const privateKey = await crypto.subtle.importKey(
+            "jwk",
+            parsed.privateJwk,
+            { name: "Ed25519" },
+            true,
+            ["sign"],
+          );
+          const publicRaw = new Uint8Array(await crypto.subtle.exportKey("raw", publicKey));
+          const publicKeyB64 = bytesToBase64Url(publicRaw);
+          const deviceId = await sha256Hex(publicRaw);
+          return { publicKey, privateKey, publicKeyB64, deviceId };
+        } catch {
+          return null;
+        }
+      };
+
+      const stored = await tryLoadStored();
+      if (stored) {
+        return stored;
+      }
+
+      const keyPair = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+      const publicJwk = await crypto.subtle.exportKey("jwk", keyPair.publicKey);
+      const privateJwk = await crypto.subtle.exportKey("jwk", keyPair.privateKey);
+      const publicRaw = new Uint8Array(await crypto.subtle.exportKey("raw", keyPair.publicKey));
+      const publicKeyB64 = bytesToBase64Url(publicRaw);
+      const deviceId = await sha256Hex(publicRaw);
+
+      localStorage.setItem(
+        DEVICE_IDENTITY_KEY,
+        JSON.stringify({
+          version: 1,
+          createdAtMs: Date.now(),
+          deviceId,
+          publicKey: publicKeyB64,
+          publicJwk,
+          privateJwk,
+        }),
+      );
+
+      return {
+        publicKey: keyPair.publicKey,
+        privateKey: keyPair.privateKey,
+        publicKeyB64,
+        deviceId,
+      };
+    }
+
+    function buildDeviceAuthPayload({ deviceId, clientId, clientMode, role, scopes, signedAtMs, token, nonce }) {
+      const version = nonce ? "v2" : "v1";
+      const fields = [
+        version,
+        deviceId,
+        clientId,
+        clientMode,
+        role,
+        (Array.isArray(scopes) ? scopes : []).join(","),
+        String(signedAtMs),
+        token || "",
+      ];
+      if (version === "v2") {
+        fields.push(nonce || "");
+      }
+      return fields.join("|");
+    }
+
+    async function buildDeviceProof({ clientId, clientMode, role, scopes, token, nonce }) {
+      const identity = await loadOrCreateDeviceIdentity();
+      const signedAt = Date.now();
+      const payload = buildDeviceAuthPayload({
+        deviceId: identity.deviceId,
+        clientId,
+        clientMode,
+        role,
+        scopes,
+        signedAtMs: signedAt,
+        token,
+        nonce,
+      });
+      const signatureBuffer = await crypto.subtle.sign(
+        { name: "Ed25519" },
+        identity.privateKey,
+        textEncoder.encode(payload),
+      );
+      const signature = bytesToBase64Url(new Uint8Array(signatureBuffer));
+      return {
+        id: identity.deviceId,
+        publicKey: identity.publicKeyB64,
+        signature,
+        signedAt,
+        nonce: nonce || undefined,
+      };
+    }
+
+    function closeGateway() {
+      if (state.ws) {
+        state.ws.close();
+      }
+      state.ws = null;
+      state.wsReady = false;
+      state.wsConnectPromise = null;
+      rejectPendingRequests("Gateway disconnected");
+      updateWsStatus("warn", "Gateway: disconnected");
+    }
+
+    function rejectPendingRequests(message) {
+      for (const waiter of state.pending.values()) {
+        waiter.reject(new Error(message));
+      }
+      state.pending.clear();
+    }
+
+    function nextId(prefix) {
+      return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    }
+
+    async function connectGateway() {
+      if (state.wsReady && state.ws) {
+        return;
+      }
+      if (state.wsConnectPromise) {
+        await state.wsConnectPromise;
+        return;
+      }
+
+      const gatewayUrl = state.settings.gatewayUrl || defaultSettings.gatewayUrl;
+      const token = await resolveDynamicSecret(state.settings.gatewayToken, state.settings.gatewayTokenProvider);
+      const password = state.settings.gatewayPassword || "";
+
+      updateWsStatus("warn", "Gateway: connecting...");
+
+      const ws = new WebSocket(gatewayUrl);
+      state.ws = ws;
+
+      state.wsConnectPromise = new Promise((resolve, reject) => {
+        const connectId = nextId("connect");
+        const requestedScopes = ["operator.read", "operator.write"];
+        const clientInfo = {
+          id: "webchat-ui",
+          displayName: "Unified Chat Facade",
+          version: "0.1.0",
+          platform: navigator.platform || "browser",
+          mode: "webchat",
+        };
+        const role = "operator";
+        let challengeNonce = "";
+        let connectSent = false;
+        let sendConnectTimer = null;
+        let settled = false;
+
+        const settleResolve = () => {
+          if (settled) return;
+          settled = true;
+          resolve();
+        };
+        const settleReject = (err) => {
+          if (settled) return;
+          settled = true;
+          reject(err);
+        };
+
+        const timer = setTimeout(() => {
+          settleReject(new Error("Gateway connect timeout"));
+        }, 10000);
+
+        const sendConnectFrame = async () => {
+          if (connectSent || settled) {
+            return;
+          }
+          connectSent = true;
+          try {
+            const device = await buildDeviceProof({
+              clientId: clientInfo.id,
+              clientMode: clientInfo.mode,
+              role,
+              scopes: requestedScopes,
+              token,
+              nonce: challengeNonce || undefined,
+            });
+            const connectFrame = {
+              type: "req",
+              id: connectId,
+              method: "connect",
+              params: {
+                minProtocol: 3,
+                maxProtocol: 3,
+                client: clientInfo,
+                auth: {
+                  token: token || undefined,
+                  password: password || undefined,
+                },
+                role,
+                scopes: requestedScopes,
+                device,
+              },
+            };
+            ws.send(JSON.stringify(connectFrame));
+          } catch (err) {
+            settleReject(new Error(`Failed to build device proof: ${err && err.message ? err.message : String(err)}`));
+            try {
+              ws.close();
+            } catch {
+              // no-op
+            }
+          }
+        };
+
+        ws.onopen = () => {
+          sendConnectTimer = setTimeout(() => {
+            void sendConnectFrame();
+          }, 120);
+        };
+
+        ws.onmessage = (event) => {
+          let frame;
+          try {
+            frame = JSON.parse(event.data);
+          } catch {
+            return;
+          }
+
+          if (frame.type === "res" && frame.id === connectId) {
+            clearTimeout(timer);
+            if (!frame.ok) {
+              settleReject(new Error(frame.error?.message || "Gateway connect rejected"));
+              return;
+            }
+            state.wsReady = true;
+            updateWsStatus("ok", "Gateway: connected");
+            settleResolve();
+            return;
+          }
+
+          if (frame.type === "res" && state.pending.has(frame.id)) {
+            const waiter = state.pending.get(frame.id);
+            state.pending.delete(frame.id);
+            if (frame.ok) waiter.resolve(frame.payload);
+            else waiter.reject(new Error(frame.error?.message || "Gateway request failed"));
+            return;
+          }
+
+          if (frame.type === "event" && frame.event === "connect.challenge") {
+            const payload = frame.payload && typeof frame.payload === "object" ? frame.payload : null;
+            challengeNonce = payload && typeof payload.nonce === "string" ? payload.nonce.trim() : "";
+            if (!connectSent) {
+              if (sendConnectTimer) {
+                clearTimeout(sendConnectTimer);
+                sendConnectTimer = null;
+              }
+              void sendConnectFrame();
+            }
+            return;
+          }
+
+          if (frame.type === "event" && frame.event === "chat") {
+            handleGatewayChatEvent(frame.payload);
+          }
+        };
+
+        ws.onerror = () => {
+          updateWsStatus("err", "Gateway: socket error");
+        };
+
+        ws.onclose = () => {
+          const wasReady = state.wsReady;
+          state.wsReady = false;
+          state.ws = null;
+          rejectPendingRequests("Gateway disconnected");
+          updateWsStatus("warn", "Gateway: disconnected");
+          if (!wasReady) {
+            settleReject(new Error("Gateway connection closed during handshake"));
+          }
+        };
+      });
+
+      try {
+        await state.wsConnectPromise;
+      } finally {
+        state.wsConnectPromise = null;
+      }
+    }
+
+    async function gatewayRequest(method, params) {
+      if (!state.ws || !state.wsReady) {
+        await connectGateway();
+      }
+      if (!state.ws || !state.wsReady) {
+        return Promise.reject(new Error("Gateway is not connected"));
+      }
+      const id = nextId(method.replace(/\W+/g, "_"));
+      const frame = {
+        type: "req",
+        id,
+        method,
+        params,
+      };
+      state.ws.send(JSON.stringify(frame));
+      return new Promise((resolve, reject) => {
+        state.pending.set(id, { resolve, reject });
+        setTimeout(() => {
+          if (state.pending.has(id)) {
+            state.pending.delete(id);
+            reject(new Error(`${method} timed out`));
+          }
+        }, 45000);
+      });
+    }
+
+    function handleGatewayChatEvent(payload) {
+      if (!payload || typeof payload !== "object") return;
+      const runId = payload.runId;
+      const sessionKey = payload.sessionKey;
+      const stateValue = payload.state;
+      const text = extractMessageText(payload.message);
+
+      const modeId = ["openclaw-dashboard", "openclaw-webchat"].find((id) => sessionKeyForMode(id) === sessionKey);
+      if (!modeId) return;
+
+      if (stateValue === "delta") {
+        if (!state.pendingRunText) {
+          state.pendingRunText = new Map();
+        }
+        const previous = state.pendingRunText.get(runId) || "";
+        state.pendingRunText.set(runId, previous + text);
+        replaceOrCreatePendingAssistant(modeId, runId, state.pendingRunText.get(runId));
+        return;
+      }
+
+      if (stateValue === "final") {
+        const finalText = text || (state.pendingRunText && state.pendingRunText.get(runId)) || "(no text)";
+        finalizePendingAssistant(modeId, runId, finalText);
+        if (state.pendingRunText) {
+          state.pendingRunText.delete(runId);
+        }
+        return;
+      }
+
+      if (stateValue === "error") {
+        finalizePendingAssistant(modeId, runId, payload.errorMessage || "Gateway run failed");
+        if (state.pendingRunText) {
+          state.pendingRunText.delete(runId);
+        }
+      }
+    }
+
+    function replaceOrCreatePendingAssistant(modeId, runId, text) {
+      const list = state.conversations[modeId];
+      const marker = `__pending__${runId}`;
+      const idx = list.findIndex((m) => m.marker === marker);
+      if (idx >= 0) {
+        list[idx].text = text;
+      } else {
+        list.push({ role: "assistant", text: text || "...", marker });
+      }
+      if (modeId === state.activeMode) {
+        renderMessages(modeId);
+      }
+    }
+
+    function finalizePendingAssistant(modeId, runId, text) {
+      const list = state.conversations[modeId];
+      const marker = `__pending__${runId}`;
+      const idx = list.findIndex((m) => m.marker === marker);
+      if (idx >= 0) {
+        list[idx] = { role: "assistant", text };
+      } else {
+        list.push({ role: "assistant", text });
+      }
+      if (modeId === state.activeMode) {
+        renderMessages(modeId);
+      }
+    }
+
+    async function loadOpenClawHistory(modeId) {
+      await connectGateway();
+      const sessionKey = sessionKeyForMode(modeId);
+      const payload = await gatewayRequest("chat.history", {
+        sessionKey,
+        limit: 100,
+      });
+      const msgs = Array.isArray(payload?.messages) ? payload.messages : [];
+      state.conversations[modeId] = msgs
+        .map((msg) => {
+          const role = msg?.role === "user" ? "user" : "assistant";
+          const text = extractMessageText(msg);
+          if (!text) return null;
+          return { role, text };
+        })
+        .filter(Boolean);
+      if (modeId === state.activeMode) {
+        renderMessages(modeId);
+      }
+    }
+
+    async function sendToOpenClaw(modeId, input) {
+      await connectGateway();
+      const sessionKey = sessionKeyForMode(modeId);
+      appendMessage("user", input, modeId);
+      const idempotencyKey = nextId("chat");
+      const payload = await gatewayRequest("chat.send", {
+        sessionKey,
+        message: input,
+        deliver: false,
+        idempotencyKey,
+      });
+      if (!payload || !payload.runId) {
+        appendMessage("assistant", "No runId returned by gateway.", modeId);
+      }
+    }
+
+    async function sendToOllama(input) {
+      appendMessage("user", input, "ollama");
+      const token = await resolveDynamicSecret(state.settings.ollamaToken, state.settings.ollamaTokenProvider);
+
+      const messages = state.conversations.ollama
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .map((m) => ({ role: m.role, content: m.text }));
+
+      const headers = { "Content-Type": "application/json" };
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+      }
+
+      const res = await fetch(state.settings.ollamaUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model: state.settings.ollamaModel,
+          messages,
+          stream: false,
+        }),
+      });
+
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`Ollama request failed (${res.status}): ${body.slice(0, 250)}`);
+      }
+
+      const payload = await res.json();
+      const text =
+        payload?.choices?.[0]?.message?.content ||
+        payload?.message?.content ||
+        payload?.response ||
+        "(empty response)";
+      appendMessage("assistant", String(text), "ollama");
+    }
+
+    async function sendCurrentMessage() {
+      const input = els.composerInput.value.trim();
+      if (!input) return;
+      els.composerInput.value = "";
+      els.composerInput.focus();
+
+      const mode = modeById(state.activeMode);
+      try {
+        if (mode.kind === "openclaw") {
+          await sendToOpenClaw(mode.id, input);
+        } else {
+          await sendToOllama(input);
+        }
+      } catch (err) {
+        const explained = mode.kind === "openclaw" ? explainGatewayError(err) : (err.message || String(err));
+        appendMessage("assistant", `Error: ${explained}`, state.activeMode);
+        if (mode.kind === "openclaw") {
+          updateWsStatus("err", `Gateway: ${explained}`);
+        }
+      }
+    }
+
+    async function switchMode(modeId) {
+      state.activeMode = modeId;
+      state.settings.activeMode = modeId;
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(state.settings));
+
+      for (const child of els.modeGroup.children) {
+        child.classList.toggle("active", child.dataset.modeId === modeId);
+      }
+
+      els.activeModeLabel.textContent = `| Mode: ${modeById(modeId).title}`;
+
+      if (modeById(modeId).kind === "openclaw") {
+        try {
+          await loadOpenClawHistory(modeId);
+          updateWsStatus("ok", "Gateway: connected");
+        } catch (err) {
+          const explained = explainGatewayError(err);
+          updateWsStatus("err", `Gateway: ${explained}`);
+          appendSystem(`OpenClaw history load failed: ${explained}`);
+        }
+      } else {
+        renderMessages(modeId);
+      }
+    }
+
+    function buildModeButtons() {
+      els.modeGroup.innerHTML = "";
+      for (const mode of MODELS) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "mode";
+        btn.dataset.modeId = mode.id;
+        btn.innerHTML = `<strong>${mode.title}</strong><small>${mode.subtitle}</small>`;
+        btn.addEventListener("click", () => switchMode(mode.id));
+        els.modeGroup.appendChild(btn);
+      }
+    }
+
+    function initEvents() {
+      els.sendBtn.addEventListener("click", sendCurrentMessage);
+      els.composerInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          sendCurrentMessage();
+        }
+      });
+
+      els.saveBtn.addEventListener("click", async () => {
+        saveSettings();
+        if (modeById(state.activeMode).kind === "openclaw") {
+          closeGateway();
+          try {
+            await loadOpenClawHistory(state.activeMode);
+            updateWsStatus("ok", "Gateway: connected");
+          } catch (err) {
+            const explained = explainGatewayError(err);
+            updateWsStatus("err", `Gateway: ${explained}`);
+            appendSystem(`OpenClaw history load failed: ${explained}`);
+          }
+        }
+      });
+
+      els.disconnectBtn.addEventListener("click", () => {
+        closeGateway();
+        appendSystem("Gateway socket disconnected");
+      });
+    }
+
+    (async function init() {
+      applySettingsToUi();
+      buildModeButtons();
+      initEvents();
+      updateWsStatus("warn", "Gateway: disconnected");
+      await switchMode(state.settings.activeMode || defaultSettings.activeMode);
+    })();
+  </script>
+</body>
+</html>

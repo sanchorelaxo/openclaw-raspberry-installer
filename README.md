@@ -244,6 +244,28 @@ openclaw doctor
 ~/.openclaw/rag_query.sh --test             # Run smoke tests
 ```
 
+### Unified chat facade (single composer, 3 backends)
+
+This repo now includes an experimental browser facade that gives you one chat
+input with a mode toggle for:
+
+- OpenClaw Dashboard session
+- OpenClaw WebChat session
+- Ollama/Hailo OpenAI-compatible chat endpoint
+
+Files:
+
+- `templates/unified-chat-facade.html`
+- `templates/UNIFIED_CHAT_FACADE.md`
+
+Open the setup guide for serving instructions, token handling, and dynamic token endpoints.
+
+Quick notes:
+
+- Browser calls to `http://127.0.0.1:8081/v1/chat/completions` require CORS headers from `hailo-sanitize-proxy.py` (including `OPTIONS` preflight handling).
+- `GET /v1/chat/completions` returns 404 by design; use `POST`.
+- If Ollama mode fails with `model not found`, set the facade model to an installed tag (for example `qwen2:1.5b`).
+
 ## Troubleshooting
 
 ### Hailo AI HAT+ 2 not detected

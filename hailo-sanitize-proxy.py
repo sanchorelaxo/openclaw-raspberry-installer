@@ -31,6 +31,12 @@ WORKSPACE_SKILLS_DIR = os.path.expanduser("~/.openclaw/workspace/skills")
 MAX_TOOL_DESCRIPTION_CHARS = 120
 MAX_TOOL_COUNT_IN_PROMPT = 8
 UPSTREAM_TIMEOUT = 300  # seconds — generation is slow (~8 tok/s)
+CORS_ALLOW_ORIGIN = os.environ.get("HAILO_PROXY_CORS_ALLOW_ORIGIN", "*")
+CORS_ALLOW_METHODS = "GET, POST, OPTIONS"
+CORS_ALLOW_HEADERS = os.environ.get(
+    "HAILO_PROXY_CORS_ALLOW_HEADERS",
+    "Authorization, Content-Type, X-Requested-With",
+)
 
 
 def _env_int(name, default):
@@ -741,6 +747,21 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         self._proxy("POST")
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _send_cors_headers(self):
+        self.send_header("Access-Control-Allow-Origin", CORS_ALLOW_ORIGIN)
+        self.send_header("Access-Control-Allow-Methods", CORS_ALLOW_METHODS)
+        self.send_header("Access-Control-Allow-Headers", CORS_ALLOW_HEADERS)
+        self.send_header("Access-Control-Max-Age", "86400")
+
+    def end_headers(self):
+        self._send_cors_headers()
+        super().end_headers()
 
     def _proxy(self, method):
         trace_id = _next_trace_id()
