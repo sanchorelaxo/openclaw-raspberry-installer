@@ -21,15 +21,36 @@ import os
 import re
 import sys
 import time
+import itertools
 import urllib.request
 import urllib.error
 
 LISTEN_PORT = 8081
 UPSTREAM = "http://127.0.0.1:8000"
 WORKSPACE_SKILLS_DIR = os.path.expanduser("~/.openclaw/workspace/skills")
-SKILL_DETAIL_NAMES = {"molt_tools"}
-MAX_SKILL_DETAIL_CHARS = 2000
+MAX_TOOL_DESCRIPTION_CHARS = 120
+MAX_TOOL_COUNT_IN_PROMPT = 8
 UPSTREAM_TIMEOUT = 300  # seconds — generation is slow (~8 tok/s)
+
+
+def _env_int(name, default):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+TRACE_ENABLED = os.environ.get("HAILO_PROXY_TRACE", "1").strip().lower() not in {
+    "0", "false", "no", "off"
+}
+TRACE_DIR = os.environ.get("HAILO_PROXY_TRACE_DIR", "/tmp/hailo-proxy-traces")
+TRACE_MAX_BYTES = _env_int("HAILO_PROXY_TRACE_MAX_BYTES", 250000)
+MAX_PROXY_COMPLETION_TOKENS = _env_int("HAILO_PROXY_MAX_TOKENS", 128)
+MAX_HISTORY_MESSAGES = _env_int("HAILO_PROXY_MAX_HISTORY_MESSAGES", 1)
+_TRACE_SEQ = itertools.count(1)
 
 MINIMAL_SYSTEM_PROMPT = (
     "You are a helpful personal assistant. "
@@ -46,9 +67,171 @@ ALLOWED_CHAT_FIELDS = {
 ALLOWED_MESSAGE_FIELDS = {
     "role", "content", "tool_calls", "name", "tool_call_id"
 }
+TOOL_INTENT_TOKENS = (
+    " use ", " tool", "skill", "/rag", "rag ", "molt", "run ", "execute"
+)
 
 
-def sanitize_chat_body(body_bytes):
+def _next_trace_id():
+    return f"{int(time.time() * 1000)}-{next(_TRACE_SEQ):06d}"
+
+
+def _ensure_trace_dir():
+    if not TRACE_ENABLED:
+        return
+    try:
+        os.makedirs(TRACE_DIR, exist_ok=True)
+    except Exception:
+        pass
+
+
+def _parse_json_dict(body_bytes):
+    try:
+        data = json.loads(body_bytes)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _json_preview(value, limit=220):
+    try:
+        text = json.dumps(value, ensure_ascii=False)
+    except Exception:
+        text = str(value)
+    if len(text) > limit:
+        return text[:limit].rstrip() + "..."
+    return text
+
+
+def _summarize_request_body(body_bytes):
+    data = _parse_json_dict(body_bytes)
+    if data is None:
+        return f"non-json body_bytes={len(body_bytes)}"
+    keys = sorted(data.keys())
+    model = data.get("model")
+    stream = data.get("stream")
+    max_tokens = data.get("max_tokens")
+    max_completion_tokens = data.get("max_completion_tokens")
+    msg_count = 0
+    role_counts = {}
+    content_chars = 0
+    if isinstance(data.get("messages"), list):
+        msg_count = len(data["messages"])
+        for msg in data["messages"]:
+            if not isinstance(msg, dict):
+                continue
+            role = msg.get("role", "unknown")
+            role_counts[role] = role_counts.get(role, 0) + 1
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict):
+                        content_chars += len(str(part.get("text", "")))
+                    else:
+                        content_chars += len(str(part))
+            else:
+                content_chars += len(str(content))
+    tools_count = len(data.get("tools", [])) if isinstance(data.get("tools"), list) else 0
+    return (
+        f"model={model} stream={stream} keys={','.join(keys)} "
+        f"messages={msg_count} roles={_json_preview(role_counts, 100)} chars={content_chars} "
+        f"max_tokens={max_tokens} max_completion_tokens={max_completion_tokens} tools={tools_count}"
+    )
+
+
+def _summarize_response_body(body_bytes):
+    data = _parse_json_dict(body_bytes)
+    if data is None:
+        return f"non-json body_bytes={len(body_bytes)}"
+    choices = data.get("choices") if isinstance(data.get("choices"), list) else []
+    content_preview = ""
+    if choices and isinstance(choices[0], dict):
+        msg = choices[0].get("message")
+        if isinstance(msg, dict):
+            content_preview = _json_preview(msg.get("content", ""), 140)
+        else:
+            content_preview = _json_preview(choices[0].get("text", ""), 140)
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    return (
+        f"id={data.get('id')} model={data.get('model')} object={data.get('object')} "
+        f"choices={len(choices)} content_preview={content_preview} usage={_json_preview(usage, 140)}"
+    )
+
+
+def _extract_tool_names(body_bytes):
+    data = _parse_json_dict(body_bytes)
+    if data is None:
+        return set()
+    tools = data.get("tools")
+    if not isinstance(tools, list):
+        return set()
+    names = set()
+    for item in tools:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "function":
+            continue
+        fn = item.get("function")
+        if not isinstance(fn, dict):
+            continue
+        name = fn.get("name")
+        if isinstance(name, str) and name:
+            names.add(name)
+    return names
+
+
+def _extract_latest_user_text(body_bytes):
+    data = _parse_json_dict(body_bytes)
+    if data is None:
+        return ""
+    messages = data.get("messages")
+    if not isinstance(messages, list):
+        return ""
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            parts = []
+            for part in content:
+                if isinstance(part, dict):
+                    if part.get("type") == "text":
+                        parts.append(str(part.get("text", "")))
+                elif isinstance(part, str):
+                    parts.append(part)
+            return "\n".join(parts)
+        return str(content)
+    return ""
+
+
+def _has_explicit_tool_intent(text):
+    normalized = f" {str(text or '').strip().lower()} "
+    if not normalized.strip():
+        return False
+    return any(token in normalized for token in TOOL_INTENT_TOKENS)
+
+
+def _write_trace(trace_id, suffix, body_bytes):
+    if not TRACE_ENABLED:
+        return
+    _ensure_trace_dir()
+    try:
+        payload = body_bytes if isinstance(body_bytes, (bytes, bytearray)) else str(body_bytes).encode("utf-8", errors="replace")
+        if len(payload) > TRACE_MAX_BYTES:
+            marker = (
+                f"\n\n...TRUNCATED... original_bytes={len(payload)} limit={TRACE_MAX_BYTES}\n"
+            ).encode("utf-8")
+            payload = payload[:TRACE_MAX_BYTES] + marker
+        path = os.path.join(TRACE_DIR, f"{trace_id}-{suffix}")
+        with open(path, "wb") as f:
+            f.write(payload)
+    except Exception:
+        pass
+
+
+def sanitize_chat_body(body_bytes, tool_prompt_enabled=True):
     """Strip unsupported fields from /v1/chat/completions request."""
     try:
         data = json.loads(body_bytes)
@@ -57,8 +240,12 @@ def sanitize_chat_body(body_bytes):
     if not isinstance(data, dict):
         return body_bytes
 
-    sanitized = {k: v for k, v in data.items() if k in ALLOWED_CHAT_FIELDS}
+    sanitized = {
+        k: v for k, v in data.items() if k in ALLOWED_CHAT_FIELDS and v is not None
+    }
     tools_payload = sanitized.pop("tools", None)
+    if not tool_prompt_enabled:
+        tools_payload = None
     if tools_payload is not None:
         try:
             with open("/tmp/hailo-proxy-tools.json", "w", encoding="utf-8") as f:
@@ -87,6 +274,19 @@ def sanitize_chat_body(body_bytes):
 
     sanitized["stream"] = False
 
+    max_tokens = sanitized.get("max_tokens")
+    max_completion_tokens = sanitized.get("max_completion_tokens")
+    if isinstance(max_tokens, int) and max_tokens > 0:
+        sanitized["max_tokens"] = min(max_tokens, MAX_PROXY_COMPLETION_TOKENS)
+    elif isinstance(max_completion_tokens, int) and max_completion_tokens > 0:
+        sanitized["max_tokens"] = min(max_completion_tokens, MAX_PROXY_COMPLETION_TOKENS)
+    else:
+        sanitized["max_tokens"] = MAX_PROXY_COMPLETION_TOKENS
+    sanitized.pop("max_completion_tokens", None)
+
+    if isinstance(sanitized.get("n"), int) and sanitized["n"] > 1:
+        sanitized["n"] = 1
+
     if "messages" in sanitized:
         tool_prompt = build_tool_prompt(tools_payload)
         sanitized["messages"] = simplify_messages(sanitized["messages"], tool_prompt)
@@ -99,8 +299,8 @@ def simplify_messages(messages, tool_prompt=None):
     if not messages:
         return messages
     other_msgs = [m for m in messages if m.get("role") != "system"]
-    if len(other_msgs) > 4:
-        other_msgs = other_msgs[-4:]
+    if len(other_msgs) > MAX_HISTORY_MESSAGES:
+        other_msgs = other_msgs[-MAX_HISTORY_MESSAGES:]
     original_sys_msgs = [m.get("content", "") for m in messages if m.get("role") == "system"]
     original_sys_len = sum(len(c) for c in original_sys_msgs)
     if original_sys_len > len(MINIMAL_SYSTEM_PROMPT):
@@ -117,16 +317,11 @@ def simplify_messages(messages, tool_prompt=None):
             except Exception:
                 pass
     system_content = MINIMAL_SYSTEM_PROMPT
-    skills_block = extract_skills_block("\n\n".join(original_sys_msgs))
-    if not skills_block:
-        skills_block = build_skills_block_from_workspace()
+    skills_block = build_skills_block_from_workspace()
     if tool_prompt:
         system_content = f"{system_content}\n\n{tool_prompt}"
     if skills_block:
         system_content = f"{system_content}\n\nAvailable skills:\n{skills_block}"
-    skill_details = build_skill_details_from_workspace()
-    if skill_details:
-        system_content = f"{system_content}\n\n{skill_details}"
     try:
         with open("/tmp/hailo-proxy-sanitized-system-prompt.txt", "w", encoding="utf-8") as f:
             f.write(system_content)
@@ -145,6 +340,7 @@ def build_tool_prompt(tools_payload):
         "- Otherwise, respond normally.",
         "Available tools:",
     ]
+    tool_count = 0
     for tool in tools_payload:
         if not isinstance(tool, dict):
             continue
@@ -155,6 +351,8 @@ def build_tool_prompt(tools_payload):
         if not name:
             continue
         desc = fn.get("description", "").strip().replace("\n", " ")
+        if len(desc) > MAX_TOOL_DESCRIPTION_CHARS:
+            desc = desc[:MAX_TOOL_DESCRIPTION_CHARS].rstrip() + "..."
         params = fn.get("parameters", {})
         props = params.get("properties", {}) if isinstance(params, dict) else {}
         args = ", ".join(sorted(props.keys())) if isinstance(props, dict) else ""
@@ -164,6 +362,10 @@ def build_tool_prompt(tools_payload):
         if args:
             label += f" (args: {args})"
         lines.append(label)
+        tool_count += 1
+        if tool_count >= MAX_TOOL_COUNT_IN_PROMPT:
+            lines.append("- ...")
+            break
     return "\n".join(lines)
 
 
@@ -224,54 +426,119 @@ def build_skills_block_from_workspace():
     return "\n".join(parts)
 
 
-def build_skill_details_from_workspace():
-    if not os.path.isdir(WORKSPACE_SKILLS_DIR):
-        return ""
-    sections = []
-    for entry in sorted(os.listdir(WORKSPACE_SKILLS_DIR)):
-        if entry not in SKILL_DETAIL_NAMES:
-            continue
-        skill_md = os.path.join(WORKSPACE_SKILLS_DIR, entry, "SKILL.md")
-        if not os.path.isfile(skill_md):
-            continue
-        try:
-            with open(skill_md, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-        except Exception:
-            continue
-        if not content:
-            continue
-        if len(content) > MAX_SKILL_DETAIL_CHARS:
-            content = content[:MAX_SKILL_DETAIL_CHARS].rstrip() + "\n..."
-        sections.append(f"## Skill: {entry}\n{content}")
-    if not sections:
-        return ""
-    return "Skill details (use exec to run scripts as described):\n" + "\n\n".join(sections)
-
-
-def parse_tool_call(content):
+def parse_tool_call(content, allowed_names=None):
     if not content or not isinstance(content, str):
         return None
     raw = content.strip()
     if raw.startswith("```"):
         raw = raw.strip("`")
         raw = raw.replace("json", "", 1).strip()
+
+    payload = None
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
-        return None
+        start = raw.find("{")
+        if start != -1:
+            depth = 0
+            end = -1
+            for idx, ch in enumerate(raw[start:], start=start):
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = idx + 1
+                        break
+            if end != -1:
+                candidate = raw[start:end]
+                try:
+                    payload = json.loads(candidate)
+                except json.JSONDecodeError:
+                    return None
+            else:
+                return None
+        else:
+            name_match = re.search(
+                r'"(?:tool|name|tool_name|skill)"\s*:\s*"([^"]+)"', raw
+            )
+            if not name_match:
+                return None
+            payload = {"tool": name_match.group(1), "arguments": {}}
+
+            command_match = re.search(r'"command"\s*:\s*"([^"]+)"', raw)
+            file_path_match = re.search(
+                r'"(?:file_path|path)"\s*:\s*"([^"]+)"', raw
+            )
+            message_match = re.search(r'"message"\s*:\s*"([^"]+)"', raw)
+            session_key_match = re.search(r'"sessionKey"\s*:\s*"([^"]+)"', raw)
+
+            if command_match:
+                payload["arguments"]["command"] = command_match.group(1)
+            if file_path_match:
+                payload["arguments"]["file_path"] = file_path_match.group(1)
+            if message_match:
+                payload["arguments"]["message"] = message_match.group(1)
+            if session_key_match:
+                payload["arguments"]["sessionKey"] = session_key_match.group(1)
     if not isinstance(payload, dict):
         return None
-    name = payload.get("tool") or payload.get("name") or payload.get("tool_name")
+    name = payload.get("tool") or payload.get("name") or payload.get("tool_name") or payload.get("skill")
     args = payload.get("arguments") or payload.get("args") or {}
     if not name:
         return None
+    if allowed_names is not None and name not in allowed_names:
+        try:
+            sys.stderr.write(
+                "hailo-sanitize-proxy: forwarding unknown tool name from model: %s\n"
+                % name
+            )
+            sys.stderr.flush()
+        except Exception:
+            pass
     if not isinstance(args, dict):
         return None
     return {"name": name, "arguments": args}
 
 
-def sanitize_response(data):
+def normalize_exec_command(command):
+    if not isinstance(command, str):
+        return ""
+    cmd = command.strip()
+    if cmd.startswith(". "):
+        cmd = cmd[2:].strip()
+    if cmd.endswith(".py") and not cmd.startswith("python"):
+        cmd = f"python3 {cmd}"
+    return cmd
+
+
+def _has_rag_intent(text):
+    norm = str(text or "").lower()
+    return "rag" in norm
+
+
+def remap_tool_call(tool_call, latest_user_text, allowed_tool_names):
+    if not tool_call or not isinstance(tool_call, dict):
+        return tool_call
+
+    name = tool_call.get("name")
+    args = tool_call.get("arguments") if isinstance(tool_call.get("arguments"), dict) else {}
+
+    if name == "exec":
+        cmd = normalize_exec_command(args.get("command", ""))
+        if cmd:
+            tool_call["arguments"] = {"command": cmd}
+        return tool_call
+
+    return tool_call
+
+
+def sanitize_response(
+    data,
+    allowed_tool_names=None,
+    tool_calls_enabled=True,
+    latest_user_text="",
+):
     """Fix hailo-ollama response for OpenAI SDK compatibility."""
     try:
         resp = json.loads(data)
@@ -296,7 +563,14 @@ def sanitize_response(data):
             choice.setdefault("logprobs", None)
             msg = choice.get("message", {})
             content = msg.get("content", "")
-            tool_call = parse_tool_call(content)
+            tool_call = None
+            if tool_calls_enabled:
+                tool_call = parse_tool_call(content, allowed_names=allowed_tool_names)
+                tool_call = remap_tool_call(
+                    tool_call,
+                    latest_user_text=latest_user_text,
+                    allowed_tool_names=allowed_tool_names,
+                )
             total_chars += len(content)
             choice["message"] = {
                 "role": msg.get("role", "assistant"),
@@ -444,15 +718,36 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self._proxy("POST")
 
     def _proxy(self, method):
+        trace_id = _next_trace_id()
+        started = time.time()
         path = self.path.rstrip("/")
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length) if length else b""
+        allowed_tool_names = _extract_tool_names(body) if body else set()
+        latest_user_text = _extract_latest_user_text(body) if body else ""
+        allow_tool_calls = _has_explicit_tool_intent(latest_user_text)
+
+        _write_trace(trace_id, "client-request.raw", body)
+        sys.stderr.write(
+            "hailo-sanitize-proxy[%s]: IN %s %s bytes=%d summary=%s\n"
+            % (trace_id, method, path, len(body), _summarize_request_body(body))
+        )
+        if body:
+            sys.stderr.write(
+                "hailo-sanitize-proxy[%s]: TOOL_INTENT enabled=%s latest_user=%s\n"
+                % (trace_id, allow_tool_calls, _json_preview(latest_user_text, 180))
+            )
+        sys.stderr.flush()
 
         # Fake /api/show
         if path == "/api/show" and method == "POST":
             resp_body = fake_api_show(body)
+            _write_trace(trace_id, "proxy-response.fake-api-show", resp_body)
             self._send_json(200, resp_body)
-            sys.stderr.write("hailo-sanitize-proxy: %s %s -> 200 (faked)\n" % (method, path))
+            sys.stderr.write(
+                "hailo-sanitize-proxy[%s]: %s %s -> 200 faked duration_ms=%d\n"
+                % (trace_id, method, path, int((time.time() - started) * 1000))
+            )
             sys.stderr.flush()
             return
 
@@ -484,9 +779,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 client_wants_stream = json.loads(body).get("stream", False)
             except Exception:
                 pass
-            body = sanitize_chat_body(body)
+            body = sanitize_chat_body(body, tool_prompt_enabled=allow_tool_calls)
 
         upstream_path = "/v1/chat/completions" if is_completion else self.path
+
+        _write_trace(trace_id, "upstream-request.body", body)
+        sys.stderr.write(
+            "hailo-sanitize-proxy[%s]: UPSTREAM %s %s body_bytes=%d summary=%s\n"
+            % (trace_id, method, upstream_path, len(body), _summarize_request_body(body))
+        )
+        sys.stderr.flush()
+
         url = "%s%s" % (UPSTREAM, upstream_path)
         req = urllib.request.Request(url, data=body if body else None, method=method)
         for header in self.headers:
@@ -497,34 +800,55 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             req.add_header("Content-Length", str(len(body)))
 
         try:
+            upstream_started = time.time()
             resp = urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT)
             data = resp.read()
+            _write_trace(trace_id, "upstream-response.raw", data)
+
+            upstream_ms = int((time.time() - upstream_started) * 1000)
+            sys.stderr.write(
+                "hailo-sanitize-proxy[%s]: UPSTREAM-RESP %s %s status=%d duration_ms=%d bytes=%d summary=%s\n"
+                % (trace_id, method, upstream_path, resp.status, upstream_ms, len(data), _summarize_response_body(data))
+            )
+            sys.stderr.flush()
 
             if is_chat:
-                data = sanitize_response(data)
+                data = sanitize_response(
+                    data,
+                    allowed_tool_names=allowed_tool_names,
+                    tool_calls_enabled=allow_tool_calls,
+                    latest_user_text=latest_user_text,
+                )
             if is_completion:
                 data = convert_chat_to_completion(data)
 
+            _write_trace(trace_id, "proxy-response.final", data)
+
             if is_chat and client_wants_stream and not is_completion:
                 sse_data = to_sse(data)
+                _write_trace(trace_id, "proxy-response.sse", sse_data)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
-                self.send_header("Connection", "keep-alive")
+                self.send_header("Connection", "close")
                 self.send_header("Content-Length", str(len(sse_data)))
+                self.end_headers()
+                self.wfile.write(sse_data)
+                self.wfile.flush()
                 sys.stderr.write(
-                    "hailo-sanitize-proxy: %s %s -> %d SSE (%d bytes)\n"
-                    % (method, path, resp.status, len(sse_data))
+                    "hailo-sanitize-proxy[%s]: %s %s -> %d SSE (%d bytes) duration_ms=%d\n"
+                    % (trace_id, method, path, resp.status, len(sse_data), int((time.time() - started) * 1000))
                 )
             else:
                 self._send_json(resp.status, data)
                 sys.stderr.write(
-                    "hailo-sanitize-proxy: %s %s -> %d (%d bytes)\n"
-                    % (method, path, resp.status, len(data))
+                    "hailo-sanitize-proxy[%s]: %s %s -> %d (%d bytes) duration_ms=%d\n"
+                    % (trace_id, method, path, resp.status, len(data), int((time.time() - started) * 1000))
                 )
             sys.stderr.flush()
         except urllib.error.HTTPError as e:
             err_data = e.read()
+            _write_trace(trace_id, "upstream-response.error", err_data)
             if is_chat and e.code == 500:
                 try:
                     ts = int(time.time())
@@ -541,11 +865,26 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(err_data)
             sys.stderr.write(
-                "hailo-sanitize-proxy: %s %s -> %d ERROR\n" % (method, path, e.code)
+                "hailo-sanitize-proxy[%s]: %s %s -> %d ERROR duration_ms=%d summary=%s\n"
+                % (trace_id, method, path, e.code, int((time.time() - started) * 1000), _summarize_response_body(err_data))
             )
             sys.stderr.flush()
+        except TimeoutError:
+            sys.stderr.write(
+                "hailo-sanitize-proxy[%s]: %s %s -> 504 TIMEOUT after_ms=%d\n"
+                % (trace_id, method, path, int((time.time() - started) * 1000))
+            )
+            sys.stderr.flush()
+            try:
+                self._send_json(504, b'{"error":"upstream timeout"}')
+            except BrokenPipeError:
+                pass
         except BrokenPipeError:
-            pass
+            sys.stderr.write(
+                "hailo-sanitize-proxy[%s]: %s %s -> client disconnected (broken pipe) after_ms=%d\n"
+                % (trace_id, method, path, int((time.time() - started) * 1000))
+            )
+            sys.stderr.flush()
         except Exception as e:
             try:
                 msg = ("Proxy error: %s" % e).encode("utf-8")
@@ -553,7 +892,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             except BrokenPipeError:
                 pass
             sys.stderr.write(
-                "hailo-sanitize-proxy: %s %s -> 502 EXCEPTION: %s\n" % (method, path, e)
+                "hailo-sanitize-proxy[%s]: %s %s -> 502 EXCEPTION after_ms=%d: %s\n"
+                % (trace_id, method, path, int((time.time() - started) * 1000), e)
             )
             sys.stderr.flush()
 
@@ -569,7 +909,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
 
 def main():
-    server = http.server.HTTPServer(("127.0.0.1", LISTEN_PORT), ProxyHandler)
+    _ensure_trace_dir()
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", LISTEN_PORT), ProxyHandler)
+    server.daemon_threads = True
     print(
         "hailo-sanitize-proxy: listening on 127.0.0.1:%d -> %s"
         % (LISTEN_PORT, UPSTREAM),

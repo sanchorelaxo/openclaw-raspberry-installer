@@ -100,6 +100,11 @@ cd ~/openclaw-raspberry-installer
   - Converts non-streaming responses to SSE format for OpenClaw's SDK
   - Fixes nanosecond timestamps and missing usage fields in responses
   - Fakes `/api/show` to avoid hailo-ollama DTO crash
+  - **Request/response tracing** with file dumps to `/tmp/hailo-proxy-traces` (env-configurable)
+  - Caps `max_tokens` and message history to reduce generation latency
+  - Tool-intent gating: only injects tool prompt when user message contains tool keywords
+  - Robust tool-call JSON parsing with regex fallback for malformed model output
+  - Threaded HTTP server to prevent blocking on concurrent requests
 - Prompts user to select from available models:
   - `qwen2:1.5b` - General purpose (default)
   - `qwen2.5:1.5b` - Improved general purpose
@@ -189,7 +194,8 @@ openclaw-raspberry-installer/
 │   └── SKILL.md
 ├── rag/                        # RAG (document search) components
 │   ├── requirements.txt        # Python dependencies
-│   └── test_rag.py             # RAG query script
+│   ├── rag_query.py            # RAG query engine (with deterministic tool_test file lookup)
+│   └── test_rag.py             # RAG smoke test script
 ├── templates/
 │   ├── HEARTBEAT.md            # 4-hour heartbeat checklist
 │   └── BOOTSTRAP.md            # First boot task
@@ -233,8 +239,9 @@ openclaw status --all
 openclaw doctor
 
 # RAG queries (if enabled)
-~/.openclaw/rag_query.sh                    # Run test queries
+~/.openclaw/rag_query.sh "your question"    # Single query
 ~/.openclaw/rag_query.sh --interactive      # Interactive mode
+~/.openclaw/rag_query.sh --test             # Run smoke tests
 ```
 
 ## Troubleshooting
@@ -326,6 +333,21 @@ newgrp docker
 openclaw doctor
 openclaw gateway status
 ```
+
+## Testing
+
+```bash
+# Run integration tests over SSH against the Pi
+bash scripts/test_tools_over_ssh.sh
+
+# Environment overrides:
+#   MOLT_TEST_ENABLED=true        Enable Moltbook skill test
+#   RAG_AGENT_TEST_ENABLED=true   Enable OpenClaw-agent RAG test (slow)
+#   LOG_FOLLOW_ENABLED=false      Disable live log tailing
+#   AGENT_TIMEOUT_SECONDS=70      Per-agent-call timeout
+```
+
+The test script validates: service health, gateway restart integrity, simple agent queries, direct RAG query, and optionally Moltbook/RAG-via-agent flows.
 
 ## License
 

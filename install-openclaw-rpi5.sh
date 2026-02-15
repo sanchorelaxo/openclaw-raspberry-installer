@@ -1321,7 +1321,12 @@ phase8_rag_setup() {
         print_step "RAG dependencies installed"
     fi
     
-    # Copy RAG test script
+    # Copy RAG query + test scripts
+    if [[ -f "$SCRIPT_DIR/rag/rag_query.py" ]]; then
+        cp "$SCRIPT_DIR/rag/rag_query.py" "$RAG_INSTALL_DIR/"
+        chmod +x "$RAG_INSTALL_DIR/rag_query.py"
+        print_step "RAG query script installed"
+    fi
     if [[ -f "$SCRIPT_DIR/rag/test_rag.py" ]]; then
         cp "$SCRIPT_DIR/rag/test_rag.py" "$RAG_INSTALL_DIR/"
         chmod +x "$RAG_INSTALL_DIR/test_rag.py"
@@ -1397,9 +1402,18 @@ EOF
     # Create convenience script
     cat > "$HOME/.openclaw/rag_query.sh" << 'EOF'
 #!/bin/bash
+set -euo pipefail
 source ~/.openclaw/rag/venv/bin/activate
-export $(cat ~/.openclaw/rag/.env | xargs)
-python3 ~/.openclaw/rag/test_rag.py "$@"
+set -a
+source ~/.openclaw/rag/.env
+set +a
+
+if [[ "${1:-}" == "--test" ]]; then
+  shift
+  python3 ~/.openclaw/rag/test_rag.py "$@"
+else
+  python3 ~/.openclaw/rag/rag_query.py "$@"
+fi
 deactivate
 EOF
     chmod +x "$HOME/.openclaw/rag_query.sh"
@@ -1407,8 +1421,9 @@ EOF
     print_step "RAG setup complete"
     echo ""
     echo "RAG Usage:"
-    echo "  Test RAG:        ~/.openclaw/rag_query.sh"
+    echo "  Query RAG:       ~/.openclaw/rag_query.sh \"your question\""
     echo "  Interactive:     ~/.openclaw/rag_query.sh --interactive"
+    echo "  Run smoke tests: ~/.openclaw/rag_query.sh --test"
     echo "  Documents dir:   $RAG_DOCS_DIR"
 }
 
