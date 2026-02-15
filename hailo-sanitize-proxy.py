@@ -71,6 +71,12 @@ TOOL_INTENT_TOKENS = (
     " use ", " tool", "skill", "/rag", "rag ", "molt", "run ", "execute"
 )
 
+# Internal OpenClaw tools the 1.5B model can't invoke correctly — suppress these.
+BLOCKED_TOOL_NAMES = {
+    "sessions_list", "sessions_history", "sessions_send",
+    "sessions_spawn", "session_status",
+}
+
 
 def _next_trace_id():
     return f"{int(time.time() * 1000)}-{next(_TRACE_SEQ):06d}"
@@ -523,6 +529,17 @@ def remap_tool_call(tool_call, latest_user_text, allowed_tool_names):
 
     name = tool_call.get("name")
     args = tool_call.get("arguments") if isinstance(tool_call.get("arguments"), dict) else {}
+
+    # Block internal tools the small model can't use correctly
+    if name in BLOCKED_TOOL_NAMES:
+        try:
+            sys.stderr.write(
+                "hailo-sanitize-proxy: suppressing blocked tool call: %s\n" % name
+            )
+            sys.stderr.flush()
+        except Exception:
+            pass
+        return None
 
     if name == "exec":
         cmd = normalize_exec_command(args.get("command", ""))
