@@ -304,9 +304,12 @@ def simplify_messages(messages, tool_prompt=None):
     """Replace OpenClaw's massive system prompt with a minimal one."""
     if not messages:
         return messages
-    other_msgs = [m for m in messages if m.get("role") != "system"]
-    if len(other_msgs) > MAX_HISTORY_MESSAGES:
-        other_msgs = other_msgs[-MAX_HISTORY_MESSAGES:]
+    # Keep only user messages to avoid confusing the model with orphaned
+    # tool/assistant messages (which cause "I can't help with that" refusals).
+    user_msgs = [m for m in messages if m.get("role") == "user"]
+    if len(user_msgs) > MAX_HISTORY_MESSAGES:
+        user_msgs = user_msgs[-MAX_HISTORY_MESSAGES:]
+    other_msgs = user_msgs
     original_sys_msgs = [m.get("content", "") for m in messages if m.get("role") == "system"]
     original_sys_len = sum(len(c) for c in original_sys_msgs)
     if original_sys_len > len(MINIMAL_SYSTEM_PROMPT):
