@@ -31,12 +31,30 @@ WORKSPACE_SKILLS_DIR = os.path.expanduser("~/.openclaw/workspace/skills")
 MAX_TOOL_DESCRIPTION_CHARS = 120
 MAX_TOOL_COUNT_IN_PROMPT = 8
 UPSTREAM_TIMEOUT = 300  # seconds — generation is slow (~8 tok/s)
-CORS_ALLOW_ORIGIN = os.environ.get("HAILO_PROXY_CORS_ALLOW_ORIGIN", "*")
+CORS_ALLOWED_ORIGINS = {
+    item.strip()
+    for item in os.environ.get(
+        "HAILO_PROXY_ALLOWED_ORIGINS",
+        "http://localhost:8787,http://127.0.0.1:8787",
+    ).split(",")
+    if item.strip()
+}
+CORS_ALLOW_NO_ORIGIN = os.environ.get("HAILO_PROXY_ALLOW_NO_ORIGIN", "1").strip().lower() not in {
+    "0", "false", "no", "off"
+}
 CORS_ALLOW_METHODS = "GET, POST, OPTIONS"
 CORS_ALLOW_HEADERS = os.environ.get(
     "HAILO_PROXY_CORS_ALLOW_HEADERS",
     "Authorization, Content-Type, X-Requested-With",
 )
+ALLOWED_HOSTS = {
+    item.strip().lower()
+    for item in os.environ.get(
+        "HAILO_PROXY_ALLOWED_HOSTS",
+        "127.0.0.1:8081,localhost:8081,[::1]:8081,127.0.0.1,localhost,[::1]",
+    ).split(",")
+    if item.strip()
+}
 
 
 def _env_int(name, default):
@@ -749,12 +767,68 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self._proxy("POST")
 
     def do_OPTIONS(self):
+        trace_id = _next_trace_id()
+        started = time.time()
+        path = self.path.rstrip("/")
+        if not self._validate_request_security(trace_id, "OPTIONS", path, started):
+            return
         self.send_response(204)
         self.send_header("Content-Length", "0")
         self.end_headers()
+        sys.stderr.write(
+            "hailo-sanitize-proxy[%s]: OPTIONS %s -> 204 preflight duration_ms=%d\n"
+            % (trace_id, path, int((time.time() - started) * 1000))
+        )
+        sys.stderr.flush()
+
+    def _origin_header(self):
+        origin = self.headers.get("Origin")
+        return origin.strip() if origin else ""
+
+    def _host_header(self):
+        host = self.headers.get("Host")
+        return host.strip().lower() if host else ""
+
+    def _is_origin_allowed(self, origin):
+        if not origin:
+            return CORS_ALLOW_NO_ORIGIN
+        return origin in CORS_ALLOWED_ORIGINS
+
+    def _is_host_allowed(self, host):
+        if not host:
+            return False
+        return host in ALLOWED_HOSTS
+
+    def _deny_request(self, trace_id, method, path, started, reason, details):
+        payload = json.dumps({"error": reason, "details": details}).encode("utf-8")
+        self._send_json(403, payload)
+        sys.stderr.write(
+            "hailo-sanitize-proxy[%s]: %s %s -> 403 denied reason=%s details=%s duration_ms=%d\n"
+            % (trace_id, method, path, reason, details, int((time.time() - started) * 1000))
+        )
+        sys.stderr.flush()
+
+    def _validate_request_security(self, trace_id, method, path, started):
+        host = self._host_header()
+        if not self._is_host_allowed(host):
+            self._deny_request(trace_id, method, path, started, "forbidden host", host or "(missing)")
+            return False
+
+        origin = self._origin_header()
+        if not self._is_origin_allowed(origin):
+            self._deny_request(trace_id, method, path, started, "forbidden origin", origin or "(missing)")
+            return False
+
+        return True
 
     def _send_cors_headers(self):
-        self.send_header("Access-Control-Allow-Origin", CORS_ALLOW_ORIGIN)
+        origin = self._origin_header()
+        if not origin:
+            return
+        if origin not in CORS_ALLOWED_ORIGINS:
+            return
+        self.send_header("Vary", "Origin")
+        self.send_header("Access-Control-Allow-Origin", origin)
         self.send_header("Access-Control-Allow-Methods", CORS_ALLOW_METHODS)
         self.send_header("Access-Control-Allow-Headers", CORS_ALLOW_HEADERS)
         self.send_header("Access-Control-Max-Age", "86400")
@@ -767,6 +841,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         trace_id = _next_trace_id()
         started = time.time()
         path = self.path.rstrip("/")
+        if not self._validate_request_security(trace_id, method, path, started):
+            return
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length) if length else b""
         allowed_tool_names = _extract_tool_names(body) if body else set()
@@ -840,7 +916,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         req = urllib.request.Request(url, data=body if body else None, method=method)
         for header in self.headers:
             lower = header.lower()
-            if lower not in ("host", "content-length", "transfer-encoding"):
+            if lower not in (
+                "host",
+                "content-length",
+                "transfer-encoding",
+                "origin",
+                "access-control-request-method",
+                "access-control-request-headers",
+            ):
                 req.add_header(header, self.headers[header])
         if body:
             req.add_header("Content-Length", str(len(body)))

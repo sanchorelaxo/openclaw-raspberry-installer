@@ -263,6 +263,9 @@ Open the setup guide for serving instructions, token handling, and dynamic token
 Quick notes:
 
 - Browser calls to `http://127.0.0.1:8081/v1/chat/completions` require CORS headers from `hailo-sanitize-proxy.py` (including `OPTIONS` preflight handling).
+- Proxy CORS is localhost-restricted by default (`http://localhost:8787` and `http://127.0.0.1:8787`).
+  - Override with `HAILO_PROXY_ALLOWED_ORIGINS` if your facade runs on a different local origin.
+  - Host header checks are also restricted by default; override with `HAILO_PROXY_ALLOWED_HOSTS` only if needed.
 - `GET /v1/chat/completions` returns 404 by design; use `POST`.
 - If Ollama mode fails with `model not found`, set the facade model to an installed tag (for example `qwen2:1.5b`).
 
