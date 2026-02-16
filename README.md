@@ -266,6 +266,7 @@ Quick notes:
 - Proxy CORS is localhost-restricted by default (`http://localhost:8787` and `http://127.0.0.1:8787`).
   - Override with `HAILO_PROXY_ALLOWED_ORIGINS` if your facade runs on a different local origin.
   - Host header checks are also restricted by default; override with `HAILO_PROXY_ALLOWED_HOSTS` only if needed.
+- Full proxy env defaults and toggles are documented in `.env.example` under the `hailo-sanitize-proxy.py` section.
 - `GET /v1/chat/completions` returns 404 by design; use `POST`.
 - If Ollama mode fails with `model not found`, set the facade model to an installed tag (for example `qwen2:1.5b`).
 
