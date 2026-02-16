@@ -1132,6 +1132,7 @@ phase3_picoclaw_install() {
     install -m 0755 "$pico_dir/build/picoclaw" "$HOME/.local/bin/picoclaw"
 
     mkdir -p "$HOME/.picoclaw"
+    mkdir -p "$HOME/.config/picoclaw"
     cat > "$HOME/.picoclaw/config.json" << EOF
 {
   "agents": {
@@ -1156,6 +1157,8 @@ phase3_picoclaw_install() {
   }
 }
 EOF
+
+    cp "$HOME/.picoclaw/config.json" "$HOME/.config/picoclaw/config.json"
 
     print_step "PicoClaw installed and configured for local Hailo endpoint"
     write_unified_facade_runtime_profile
@@ -1209,13 +1212,13 @@ phase3_zeroclaw_install() {
     mkdir -p "$HOME/.zeroclaw"
     cat > "$HOME/.zeroclaw/config.toml" << EOF
 api_key = "hailo-local"
-default_provider = "ollama"
+default_provider = "custom:http://127.0.0.1:8081/v1"
 default_model = "$HAILO_MODEL"
 default_temperature = 0.7
 
 [gateway]
 host = "127.0.0.1"
-port = 3000
+port = 8080
 require_pairing = true
 
 [autonomy]

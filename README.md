@@ -182,6 +182,9 @@ bash scripts/test_tools_over_ssh.sh
 
 ```bash
 SSH_HOST=raspberrypi SSH_USER=sanchobot scripts/test_claw_flavors_over_ssh.sh
+
+# Force matrix run for all flavors by rewriting runtime profile per flavor
+RUN_ALL_FLAVORS=true SSH_HOST=raspberrypi SSH_USER=sanchobot scripts/test_claw_flavors_over_ssh.sh
 ```
 
 This validates:
