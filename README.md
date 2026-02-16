@@ -1,379 +1,259 @@
 # OpenClaw Raspberry Pi 5 GenAI Kit Installer
 
-Automated installer for OpenClaw on the CanaKit Raspberry Pi 5 8GB Dual Cooling GenAI Kit with Hailo 10H AI accelerator.
+Automated installer for local AI assistants on Raspberry Pi 5 + Hailo-10H (AI HAT+ 2), with selectable flavor: OpenClaw, PicoClaw, or ZeroClaw.
 
-## Target Hardware
+## Quick navigation
 
-- **CanaKit Raspberry Pi 5 8GB Dual Cooling GenAI Kit (256GB Flash Edition)**
-  - Raspberry Pi 5 with 8GB RAM
-  - AI HAT+ 2 with Hailo 10H neural network accelerator (8GB onboard RAM)
-  - 256GB Raspberry Pi Flash Drive
-  - Pre-loaded with Raspberry Pi OS Trixie (Debian 13)
+- [What this repo does](#what-this-repo-does)
+- [Supported flavors](#supported-flavors)
+- [Target hardware and prerequisites](#target-hardware-and-prerequisites)
+- [Quick start](#quick-start)
+  - [Online install](#online-install-recommended)
+  - [Offline install](#offline-install)
+- [Installer phases](#installer-phases)
+- [Service architecture and ports](#service-architecture-and-ports)
+- [Configuration flags (`.env.example`)](#configuration-flags-envexample)
+- [Unified chat facade](#unified-chat-facade)
+- [Testing](#testing)
+- [Troubleshooting](#troubleshooting)
+- [Project layout](#project-layout)
+- [License](#license)
 
-## What Gets Installed
+## What this repo does
 
-1. **Node.js 22+** via `n` version manager (Trixie-compatible)
-2. **Docker** with Trixie-specific installation method
-3. **Hailo GenAI stack** with user-selected model (fully local, no cloud auth)
-4. **OpenClaw** personal AI assistant with systemd daemon
-5. **Custom executive assistant configuration** from `clawdbot-assistant.md`
-6. **molt_tools skill** for Moltbook integration
-7. **Channel options**: WebChat (default) or Matrix (self-hosted Synapse)
-8. **RAG (optional)**: Local document search with nomic-embed-text embeddings
+This project installs and configures a local assistant stack on Raspberry Pi:
 
-## Quick Start
+1. System/runtime dependencies (Node, Docker, etc.)
+2. Hailo GenAI stack (`hailo-ollama`) and optional sanitizing proxy
+3. Selected assistant flavor (`openclaw`, `picoclaw`, or `zeroclaw`)
+4. Optional OpenClaw-only extras (molt_tools, channel setup, RAG)
+5. Validation and SSH test scripts
 
-### Online Installation (requires internet on Pi)
+For the main entrypoint see [`install-openclaw-rpi5.sh`](./install-openclaw-rpi5.sh).
+
+## Supported flavors
+
+- **`openclaw`** (default): full OpenClaw flow including OpenClaw-specific phases.
+- **`picoclaw`**: full PicoClaw install/build + local Hailo model wiring.
+- **`zeroclaw`**: full ZeroClaw install/build + local Hailo model wiring.
+
+Set via environment:
+
+```bash
+CLAW_FLAVOR=openclaw ./install-openclaw-rpi5.sh
+CLAW_FLAVOR=picoclaw ./install-openclaw-rpi5.sh
+CLAW_FLAVOR=zeroclaw ./install-openclaw-rpi5.sh
+```
+
+If omitted, installer prompts interactively.
+
+## Target hardware and prerequisites
+
+### Hardware
+
+- Raspberry Pi 5 (8GB recommended)
+- Raspberry Pi AI HAT+ 2 with Hailo-10H
+- 27W USB-C power supply (recommended)
+- Active cooling (recommended)
+
+### Software
+
+- Raspberry Pi OS Trixie (Debian 13), 64-bit
+- Internet for online install (or prepare offline bundle)
+
+### Pre-install hardware checklist
+
+1. `sudo apt update && sudo apt full-upgrade`
+2. Mount AI HAT+ 2 and PCIe ribbon cable correctly
+3. Verify detection:
+
+```bash
+lspci | grep Hailo
+```
+
+See also: [Troubleshooting / Hailo not detected](#hailo-ai-hat-2-not-detected).
+
+## Quick start
+
+### Online install (recommended)
+
 ```bash
 git clone https://github.com/sanchorelaxo/openclaw-raspberry-installer.git
 cd openclaw-raspberry-installer
 ./install-openclaw-rpi5.sh
 ```
 
-### Offline Installation (no internet on Pi)
+### Offline install
 
-**Step 1: Prepare offline bundle (on machine with internet)**
+1) Prepare bundle on a networked machine:
+
 ```bash
-git clone https://github.com/yourusername/openclaw-raspberry-installer.git
+git clone https://github.com/sanchorelaxo/openclaw-raspberry-installer.git
 cd openclaw-raspberry-installer
 ./install-openclaw-rpi5.sh --prepare-offline
 ```
 
-This downloads:
-- Node.js 22 ARM64 binary (~25MB)
-- Docker .deb packages for Trixie ARM64 (~100MB)
-- OpenClaw npm package (~5MB)
-- (Manual) Hailo models if available
+2) Copy folder to Pi (USB or SCP).
 
-**Step 2: Copy to Pi**
-```bash
-# Via USB drive
-cp -r openclaw-raspberry-installer /media/usb/
+3) Run on Pi:
 
-# OR via SCP (if Pi has temporary network)
-scp -r openclaw-raspberry-installer pi@PI_IP:~/
-```
-
-**Step 3: Run offline install on Pi**
 ```bash
 cd ~/openclaw-raspberry-installer
 ./install-openclaw-rpi5.sh --offline
 ```
 
-## Prerequisites
+## Installer phases
 
-### Hardware
-- **Raspberry Pi 5** (8GB recommended)
-- **Raspberry Pi AI HAT+ 2** with Hailo-10H (40 TOPS INT4, 8GB on-board RAM)
-- **27W USB-C Power Supply** (official Raspberry Pi recommended)
-- **Active Cooler** for Raspberry Pi 5 (recommended)
-- **AI HAT+ 2 heatsink** installed (included with HAT)
+See source for exact behavior: [`install-openclaw-rpi5.sh`](./install-openclaw-rpi5.sh).
 
-### Software
-- **Raspberry Pi OS Trixie (64-bit)** - latest version with updates
-- Internet connection for online install (or use `--offline` mode)
+### Common phases
 
-### Hardware Setup (before running installer)
-1. Update Pi firmware: `sudo apt update && sudo apt full-upgrade`
-2. Install Active Cooler on Pi 5
-3. Install AI HAT+ 2 heatsink (thermal pads on NPU and RAM)
-4. Mount AI HAT+ 2 with spacers and connect PCIe ribbon cable
-5. Verify detection: `lspci | grep Hailo` should show the device
+- **Phase 1**: system preparation (packages, Node, Docker)
+- **Phase 2**: Hailo setup + `hailo-ollama` + optional `hailo-sanitize-proxy`
+- **Phase 3**: selected flavor install (`openclaw` / `picoclaw` / `zeroclaw`)
+- **Phase 9**: verification
 
-## Installation Phases
+### OpenClaw-only phases
 
-### Phase 1: System Preparation
-- Updates system packages
-- Installs Node.js 22+ via `n` version manager
-- Installs Docker (Trixie-specific method)
+These run only when `CLAW_FLAVOR=openclaw`:
 
-### Phase 2: Hailo AI HAT+ 2 Setup
-- Detects Hailo-10H via PCIe (`lspci | grep Hailo`)
-- Installs `hailo-h10-all` package (HailoRT for Hailo-10H) via apt
-- Installs Hailo GenAI Model Zoo (hailo-ollama server)
-- Creates **systemd service** (`hailo-ollama.service`) so the server starts on boot
-  - hailo-ollama is an Ollama-compatible REST API on **port 8000** (not actual Ollama)
-  - Must be running before OpenClaw or any client can use it
-- Installs **sanitizing proxy** (`hailo-sanitize-proxy.service`) on **port 8081** (optional)
-  - Strips unsupported request fields that crash hailo-ollama's oatpp DTOs
-  - Replaces OpenClaw's massive system prompt with a minimal one (2048-token context)
-  - Converts non-streaming responses to SSE format for OpenClaw's SDK
-  - Fixes nanosecond timestamps and missing usage fields in responses
-  - Fakes `/api/show` to avoid hailo-ollama DTO crash
-  - **Request/response tracing** with file dumps to `/tmp/hailo-proxy-traces` (env-configurable)
-  - Caps `max_tokens` and message history to reduce generation latency
-  - Tool-intent gating: only injects tool prompt when user message contains tool keywords
-  - Robust tool-call JSON parsing with regex fallback for malformed model output
-  - Threaded HTTP server to prevent blocking on concurrent requests
-- Prompts user to select from available models:
-  - `qwen2:1.5b` - General purpose (default)
-  - `qwen2.5:1.5b` - Improved general purpose
-  - `qwen2.5-coder:1.5b` - Optimized for coding
-  - `llama3.2:1b` - Meta's compact model
-  - `deepseek_r1:1.5b` - Reasoning-focused model
-- Pulls selected model via hailo-ollama API
+- Phase 4: deploy assistant config
+- Phase 5: deploy `molt_tools`
+- Phase 6: proactive behavior prompts
+- Phase 7: channel configuration
+- Phase 8: optional RAG setup
 
-### Phase 3: OpenClaw Installation
-- Installs OpenClaw CLI
-- Runs onboarding wizard
-- Removes `OLLAMA_API_KEY` to disable auto-discovery (which probes buggy `/api/show`)
-- Configures **explicit** Ollama provider pointing to sanitizing proxy on **port 8081** (if enabled)
-  - Uses `api: "openai-completions"` with `/v1/chat/completions` endpoint
-  - Model definitions advertise `contextWindow: 16000` (OpenClaw minimum; real is 2048)
-  - All tools denied (`tools.deny: ["*"]`) — 1.5B models can't handle tool calls
-  - Writes `auth-profiles.json` with dummy token (required by OpenClaw)
+## Service architecture and ports
 
-### Phase 4: Deploy Custom Configuration
-- Deploys `clawdbot-assistant.md` as `CLAUDE.md` and `AGENTS.md`
-- Interactive customization of "What I Care About" section:
-  - Deep work hours
-  - Priority contacts
-  - Priority projects
-  - Ignore list
+### Core local model path
 
-### Phase 5: Deploy molt_tools Skill
-- Copies molt_tools to OpenClaw workspace
-- Creates SKILL.md documentation
-- Prompts for Moltbook API key
+- `hailo-ollama` on `127.0.0.1:8000`
+- optional `hailo-sanitize-proxy` on `127.0.0.1:8081`
 
-### Phase 6: Configure Proactive Behaviors
-Interactive prompts to enable/disable:
-- Auto-respond to routine emails
-- Auto-decline calendar invites
-- Auto-organize Downloads folder
-- Monitor stock/crypto prices
+### Why proxy is often required
 
-### Phase 7: Channel Configuration
-Choose between:
-- **WebChat** (default): Zero setup, available at `http://localhost:18789/`
-- **Matrix**: Full Synapse homeserver setup with Nginx + SSL
+For OpenClaw-like traffic, the proxy normalizes incompatible behavior (e.g. `/api/show`, stream adaptation, payload sanitization). Keep enabled unless explicitly testing direct mode.
 
-### Phase 8: RAG Setup (Optional)
-- Prompts to enable RAG (Retrieval-Augmented Generation)
-- Installs Python dependencies (llama-index, chromadb, pypdf)
-- Pulls `nomic-embed-text` embedding model
-- Prompts for document directory to copy for local search
-- Creates convenience script for querying documents
-- Persists selected document directory to `~/.openclaw/rag/.docs_source`
-- Uses local embeddings (sentence-transformers) by default
-- Uses OpenAI-compatible proxy (`http://127.0.0.1:8081/v1`) for LLM calls
-
-### Phase 9: Verification
-- Runs `openclaw doctor`
-- Runs `openclaw status --all`
-- Runs `openclaw health`
-
-### Feature flag: USE_SANITIZER_PROXY_ON_OLLAMA
-The installer supports an environment flag to disable the sanitizing proxy
-and point OpenClaw directly at hailo-ollama (port 8000).
+Feature flag:
 
 ```bash
-# Default (recommended): use the sanitizing proxy on port 8081
+# Recommended
 USE_SANITIZER_PROXY_ON_OLLAMA=true ./install-openclaw-rpi5.sh
 
-# Disable proxy (not recommended unless testing)
+# Direct hailo-ollama path (advanced/testing)
 USE_SANITIZER_PROXY_ON_OLLAMA=false ./install-openclaw-rpi5.sh
 ```
 
-## First Boot Task
+## Configuration flags (`.env.example`)
 
-After installation, OpenClaw's first task is to:
-1. Check Moltbook connection via `check_moltbook.py`
-2. Post "i've been boxed into a Raspberry Pi !" to Moltbook
-3. Report success/failure
+See [`./.env.example`](./.env.example) for complete examples.
 
-## File Structure
+Key flags:
 
-```
-openclaw-raspberry-installer/
-├── install-openclaw-rpi5.sh    # Main installer script
-├── clawdbot-assistant.md       # Executive assistant configuration
-├── molt_tools/                 # Moltbook integration skill
-│   ├── check_moltbook.py
-│   ├── post_to_moltbook.py
-│   └── SKILL.md
-├── rag/                        # RAG (document search) components
-│   ├── requirements.txt        # Python dependencies
-│   ├── rag_query.py            # RAG query engine (with deterministic tool_test file lookup)
-│   └── test_rag.py             # RAG smoke test script
-├── templates/
-│   ├── HEARTBEAT.md            # 4-hour heartbeat checklist
-│   └── BOOTSTRAP.md            # First boot task
-├── offline_bundle/             # Created by --prepare-offline
-│   ├── node-v22.x-linux-arm64.tar.xz
-│   ├── docker_debs/
-│   ├── openclaw-*.tgz
-│   ├── hailo_models/           # Including nomic-embed-text if selected
-│   └── manifest.json
-└── README.md
-```
+- `CLAW_FLAVOR` (`openclaw|picoclaw|zeroclaw`)
+- `USE_SANITIZER_PROXY_ON_OLLAMA`
+- `USE_OPENCLAW_TOOLS` (OpenClaw-specific)
+- `HAILO_MODEL`
+- Proxy CORS/security knobs (`HAILO_PROXY_*`)
 
-## Configuration Files (after install)
-
-- `~/.openclaw/openclaw.json` - OpenClaw configuration
-- `~/.openclaw/workspace/AGENTS.md` - Agent instructions
-- `~/.openclaw/workspace/CLAUDE.md` - Agent instructions (alias)
-- `~/.openclaw/workspace/HEARTBEAT.md` - Heartbeat checklist
-- `~/.config/moltbook/credentials.json` - Moltbook API key
-- `~/.openclaw/rag/` - RAG installation (if enabled)
-- `~/.openclaw/rag_documents/` - Documents for RAG search
-- `~/.openclaw/rag_query.sh` - Convenience script for RAG queries
-
-## Usage After Installation
-
-```bash
-# hailo-ollama + sanitizing proxy run as systemd services (auto-start on boot)
-sudo systemctl status hailo-ollama hailo-sanitize-proxy
-sudo journalctl -u hailo-sanitize-proxy -f  # Proxy logs show request/response flow
-
-# Start OpenClaw gateway
-openclaw gateway --port 18789 --verbose
-
-# Open dashboard
-openclaw dashboard
-
-# Check status
-openclaw status --all
-
-# Run diagnostics
-openclaw doctor
-
-# RAG queries (if enabled)
-~/.openclaw/rag_query.sh "your question"    # Single query
-~/.openclaw/rag_query.sh --interactive      # Interactive mode
-~/.openclaw/rag_query.sh --test             # Run smoke tests
-```
-
-### Unified chat facade (single composer, 3 backends)
-
-This repo now includes an experimental browser facade that gives you one chat
-input with a mode toggle for:
-
-- OpenClaw Dashboard session
-- OpenClaw WebChat session
-- Ollama/Hailo OpenAI-compatible chat endpoint
+## Unified chat facade
 
 Files:
 
-- `templates/unified-chat-facade.html`
-- `templates/UNIFIED_CHAT_FACADE.md`
+- [`templates/unified-chat-facade.html`](./templates/unified-chat-facade.html)
+- [`templates/UNIFIED_CHAT_FACADE.md`](./templates/UNIFIED_CHAT_FACADE.md)
+- `templates/unified-chat-runtime.json` (generated by installer)
 
-Open the setup guide for serving instructions, token handling, and dynamic token endpoints.
+### Behavior
 
-Quick notes:
+- Facade loads generated runtime profile and snaps to selected flavor defaults.
+- Conditional modes can appear depending on installed flavor/runtime profile.
+- For browser calls to `:8081`, proxy provides CORS handling (restricted to localhost origins by default).
 
-- Browser calls to `http://127.0.0.1:8081/v1/chat/completions` require CORS headers from `hailo-sanitize-proxy.py` (including `OPTIONS` preflight handling).
-- Proxy CORS is localhost-restricted by default (`http://localhost:8787` and `http://127.0.0.1:8787`).
-  - Override with `HAILO_PROXY_ALLOWED_ORIGINS` if your facade runs on a different local origin.
-  - Host header checks are also restricted by default; override with `HAILO_PROXY_ALLOWED_HOSTS` only if needed.
-- Full proxy env defaults and toggles are documented in `.env.example` under the `hailo-sanitize-proxy.py` section.
-- `GET /v1/chat/completions` returns 404 by design; use `POST`.
-- If Ollama mode fails with `model not found`, set the facade model to an installed tag (for example `qwen2:1.5b`).
+## Testing
+
+### OpenClaw regression suite
+
+```bash
+bash scripts/test_tools_over_ssh.sh
+```
+
+### Adaptive cross-flavor/facade/proxy checks
+
+```bash
+SSH_HOST=raspberrypi SSH_USER=sanchobot scripts/test_claw_flavors_over_ssh.sh
+```
+
+This validates:
+
+- flavor/runtime profile alignment
+- facade runtime-profile integration
+- direct-vs-proxy compatibility matrix for Hailo endpoints
 
 ## Troubleshooting
 
 ### Hailo AI HAT+ 2 not detected
-Check PCIe connection:
+
 ```bash
 lspci | grep Hailo
-# Should show: "Co-processor: Hailo Technologies Ltd. Hailo-10 AI Processor"
 ```
 
-If not detected:
-1. Verify PCIe ribbon cable is properly connected
-2. Check power supply (27W USB-C recommended)
-3. Update firmware: `sudo apt update && sudo apt full-upgrade`
-4. Reboot and try again
+If missing:
 
-### Install Hailo software stack
-```bash
-sudo apt update
-sudo apt install -y dkms
-sudo apt install -y hailo-all
-```
+1. Re-seat PCIe ribbon/cable
+2. Confirm power delivery (27W recommended)
+3. Update firmware and reboot
 
-### Verify HailoRT installation
-```bash
-hailortcli fw-control identify
-# Should show device info including "Hailo-10H"
-```
+### `hailo-ollama` service not running
 
-### Install Hailo GenAI Model Zoo (hailo-ollama)
-Download from [Hailo Developer Zone](https://hailo.ai/developer-zone/software-downloads/):
-```bash
-sudo dpkg -i hailo_gen_ai_model_zoo_5.1.1_arm64.deb
-```
-
-### HAILO_OUT_OF_PHYSICAL_DEVICES (status=74)
-The `hailort_service` (multi-process RPC daemon for Hailo-8/8L) conflicts with hailo-ollama
-on Hailo-10H by competing for `/dev/hailo0`. Disable it:
-```bash
-sudo systemctl stop hailort
-sudo systemctl disable hailort
-sudo systemctl restart hailo-ollama
-```
-
-### hailo-ollama service not running
 ```bash
 sudo systemctl status hailo-ollama
 sudo systemctl restart hailo-ollama
-sudo journalctl -u hailo-ollama -f   # View logs
-curl http://localhost:8000/api/version  # Test API
+sudo journalctl -u hailo-ollama -f
+curl http://localhost:8000/api/version
 ```
 
-### OpenClaw can't reach model provider
-Both hailo-ollama (port 8000) and the sanitizing proxy (port 8081) must be running.
-OpenClaw connects to the **proxy** on port 8081, which forwards to hailo-ollama on port 8000.
+### OpenClaw cannot reach model provider
+
 ```bash
-# Check both services
 sudo systemctl status hailo-ollama hailo-sanitize-proxy
-# Test the chain
-curl http://localhost:8000/api/tags     # Direct to hailo-ollama
-curl http://localhost:8081/api/tags     # Through proxy
-# Check OpenClaw config points to proxy
-cat ~/.openclaw/openclaw.json | grep baseUrl
-# Should show: http://127.0.0.1:8081/v1
+curl http://localhost:8000/api/tags
+curl http://localhost:8081/api/tags
+grep baseUrl ~/.openclaw/openclaw.json
 ```
 
-### Sanitizing proxy issues
-```bash
-sudo journalctl -u hailo-sanitize-proxy -f   # View proxy logs
-sudo systemctl restart hailo-sanitize-proxy   # Restart proxy
-```
+Expected (proxy mode): `http://127.0.0.1:8081/v1`
 
-### Node.js version issues
-```bash
-sudo n stable
-hash -r
-node -v  # Should show v22.x
-```
-
-### Docker permission denied
-```bash
-sudo usermod -aG docker $USER
-newgrp docker
-```
-
-### OpenClaw not responding
-```bash
-openclaw doctor
-openclaw gateway status
-```
-
-## Testing
+### Proxy issues
 
 ```bash
-# Run integration tests over SSH against the Pi
-bash scripts/test_tools_over_ssh.sh
-
-# Environment overrides:
-#   MOLT_TEST_ENABLED=true        Enable Moltbook skill test
-#   RAG_AGENT_TEST_ENABLED=true   Enable OpenClaw-agent RAG test (slow)
-#   LOG_FOLLOW_ENABLED=false      Disable live log tailing
-#   AGENT_TIMEOUT_SECONDS=70      Per-agent-call timeout
+sudo journalctl -u hailo-sanitize-proxy -f
+sudo systemctl restart hailo-sanitize-proxy
 ```
 
-The test script validates: service health, gateway restart integrity, simple agent queries, direct RAG query, and optionally Moltbook/RAG-via-agent flows.
+### Node / Docker quick fixes
+
+```bash
+sudo n stable && hash -r && node -v
+sudo usermod -aG docker $USER && newgrp docker
+```
+
+## Project layout
+
+```text
+openclaw-raspberry-installer/
+├── install-openclaw-rpi5.sh
+├── scripts/
+│   ├── test_tools_over_ssh.sh
+│   └── test_claw_flavors_over_ssh.sh
+├── templates/
+│   ├── unified-chat-facade.html
+│   ├── UNIFIED_CHAT_FACADE.md
+│   └── (generated) unified-chat-runtime.json
+├── molt_tools/
+├── rag/
+└── .env.example
+```
 
 ## License
 

@@ -344,7 +344,7 @@
   </main>
 
   <script>
-    const MODELS = [
+    let MODELS = [
       {
         id: "openclaw-dashboard",
         title: "OpenClaw Dashboard",
@@ -377,7 +377,7 @@
       dashboardSessionKey: "webchat:dashboard",
       webchatSessionKey: "webchat:mobile",
       ollamaUrl: "http://127.0.0.1:8081/v1/chat/completions",
-      ollamaModel: "qwen2.5:1.5b",
+      ollamaModel: "qwen2:1.5b",
       ollamaToken: "",
       ollamaTokenProvider: "",
       activeMode: "openclaw-dashboard",
@@ -390,13 +390,22 @@
       wsConnectPromise: null,
       pending: new Map(),
       pendingRunText: new Map(),
-      conversations: {
-        "openclaw-dashboard": [],
-        "openclaw-webchat": [],
-        "ollama": [],
-      },
+      conversations: {},
       activeMode: null,
     };
+
+    function ensureConversation(modeId) {
+      if (!state.conversations[modeId]) {
+        state.conversations[modeId] = [];
+      }
+      return state.conversations[modeId];
+    }
+
+    function ensureConversationsForModes() {
+      for (const mode of MODELS) {
+        ensureConversation(mode.id);
+      }
+    }
 
     const els = {
       modeGroup: document.getElementById("modeGroup"),
@@ -465,6 +474,50 @@
       return MODELS.find((m) => m.id === id) || MODELS[0];
     }
 
+    async function loadRuntimeProfile() {
+      try {
+        const res = await fetch("./unified-chat-runtime.json", { cache: "no-store" });
+        if (!res.ok) {
+          return;
+        }
+        const runtime = await res.json();
+        if (!runtime || typeof runtime !== "object") {
+          return;
+        }
+
+        const extraModes = Array.isArray(runtime.extraModes)
+          ? runtime.extraModes
+              .filter((m) => m && typeof m === "object" && typeof m.id === "string")
+              .map((m) => ({
+                id: String(m.id),
+                title: String(m.title || m.id),
+                subtitle: String(m.subtitle || "Runtime mode"),
+                kind: String(m.kind || "http-chat"),
+                endpoint: typeof m.endpoint === "string" ? m.endpoint : "",
+                model: typeof m.model === "string" ? m.model : "",
+              }))
+          : [];
+
+        MODELS = MODELS.concat(extraModes);
+        ensureConversationsForModes();
+
+        if (typeof runtime.gatewayUrl === "string" && runtime.gatewayUrl.trim()) {
+          state.settings.gatewayUrl = runtime.gatewayUrl.trim();
+        }
+        if (typeof runtime.ollamaUrl === "string" && runtime.ollamaUrl.trim()) {
+          state.settings.ollamaUrl = runtime.ollamaUrl.trim();
+        }
+        if (typeof runtime.ollamaModel === "string" && runtime.ollamaModel.trim()) {
+          state.settings.ollamaModel = runtime.ollamaModel.trim();
+        }
+        if (typeof runtime.activeMode === "string" && runtime.activeMode.trim()) {
+          state.settings.activeMode = runtime.activeMode.trim();
+        }
+      } catch {
+        // runtime profile optional
+      }
+    }
+
     function sessionKeyForMode(modeId) {
       if (modeId === "openclaw-dashboard") {
         return state.settings.dashboardSessionKey || defaultSettings.dashboardSessionKey;
@@ -476,7 +529,7 @@
     }
 
     function appendMessage(role, text, modeId) {
-      state.conversations[modeId].push({ role, text });
+      ensureConversation(modeId).push({ role, text });
       if (modeId === state.activeMode) {
         renderMessages(modeId);
       }
@@ -491,6 +544,7 @@
     }
 
     function renderMessages(modeId) {
+      ensureConversation(modeId);
       els.messages.innerHTML = "";
       for (const item of state.conversations[modeId]) {
         const div = document.createElement("div");
@@ -961,7 +1015,7 @@
     }
 
     function finalizePendingAssistant(modeId, runId, text) {
-      const list = state.conversations[modeId];
+      const list = ensureConversation(modeId);
       const marker = `__pending__${runId}`;
       const idx = list.findIndex((m) => m.marker === marker);
       if (idx >= 0) {
@@ -1048,6 +1102,46 @@
       appendMessage("assistant", String(text), "ollama");
     }
 
+    async function sendToHttpChat(mode, input) {
+      const modeId = mode.id;
+      appendMessage("user", input, modeId);
+
+      const token = await resolveDynamicSecret(state.settings.ollamaToken, state.settings.ollamaTokenProvider);
+      const messages = ensureConversation(modeId)
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .map((m) => ({ role: m.role, content: m.text }));
+
+      const headers = { "Content-Type": "application/json" };
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+      }
+
+      const endpoint = mode.endpoint || state.settings.ollamaUrl;
+      const model = mode.model || state.settings.ollamaModel;
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model,
+          messages,
+          stream: false,
+        }),
+      });
+
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`HTTP chat request failed (${res.status}): ${body.slice(0, 250)}`);
+      }
+
+      const payload = await res.json();
+      const text =
+        payload?.choices?.[0]?.message?.content ||
+        payload?.message?.content ||
+        payload?.response ||
+        "(empty response)";
+      appendMessage("assistant", String(text), modeId);
+    }
+
     async function sendCurrentMessage() {
       const input = els.composerInput.value.trim();
       if (!input) return;
@@ -1058,6 +1152,8 @@
       try {
         if (mode.kind === "openclaw") {
           await sendToOpenClaw(mode.id, input);
+        } else if (mode.kind === "http-chat") {
+          await sendToHttpChat(mode, input);
         } else {
           await sendToOllama(input);
         }
@@ -1071,6 +1167,7 @@
     }
 
     async function switchMode(modeId) {
+      ensureConversation(modeId);
       state.activeMode = modeId;
       state.settings.activeMode = modeId;
       localStorage.setItem(SETTINGS_KEY, JSON.stringify(state.settings));
@@ -1139,11 +1236,14 @@
     }
 
     (async function init() {
+      ensureConversationsForModes();
+      await loadRuntimeProfile();
       applySettingsToUi();
       buildModeButtons();
       initEvents();
       updateWsStatus("warn", "Gateway: disconnected");
-      await switchMode(state.settings.activeMode || defaultSettings.activeMode);
+      const startMode = modeById(state.settings.activeMode || defaultSettings.activeMode).id;
+      await switchMode(startMode);
     })();
   </script>
 </body>

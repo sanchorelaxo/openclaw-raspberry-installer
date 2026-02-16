@@ -23,6 +23,7 @@ OFFLINE_MODE=false
 PREPARE_OFFLINE=false
 USE_SANITIZER_PROXY_ON_OLLAMA=${USE_SANITIZER_PROXY_ON_OLLAMA:-true}
 USE_OPENCLAW_TOOLS=${USE_OPENCLAW_TOOLS:-true}
+CLAW_FLAVOR=${CLAW_FLAVOR:-openclaw}
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -95,6 +96,95 @@ prompt_input() {
         read -p "$prompt: " response
         echo "$response"
     fi
+}
+
+normalize_claw_flavor() {
+    local raw="${1:-openclaw}"
+    raw=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')
+    case "$raw" in
+        openclaw|picoclaw|zeroclaw)
+            printf '%s' "$raw"
+            ;;
+        *)
+            printf '%s' "openclaw"
+            ;;
+    esac
+}
+
+prompt_claw_flavor() {
+    CLAW_FLAVOR=$(normalize_claw_flavor "$CLAW_FLAVOR")
+    echo ""
+    echo "Select assistant flavor to install:"
+    echo "  1) OpenClaw (TypeScript)"
+    echo "  2) PicoClaw (Go)"
+    echo "  3) ZeroClaw (Rust)"
+    echo ""
+    local default_choice="1"
+    case "$CLAW_FLAVOR" in
+        picoclaw) default_choice="2" ;;
+        zeroclaw) default_choice="3" ;;
+    esac
+
+    local choice
+    choice=$(prompt_input "Choice" "$default_choice")
+    case "$choice" in
+        2) CLAW_FLAVOR="picoclaw" ;;
+        3) CLAW_FLAVOR="zeroclaw" ;;
+        *) CLAW_FLAVOR="openclaw" ;;
+    esac
+    print_step "Selected assistant flavor: $CLAW_FLAVOR"
+}
+
+write_unified_facade_runtime_profile() {
+    local facade_runtime_path="$SCRIPT_DIR/templates/unified-chat-runtime.json"
+    local ollama_chat_url="http://127.0.0.1:8081/v1/chat/completions"
+    local active_mode="ollama"
+    local extra_mode_json="[]"
+
+    if [[ "$CLAW_FLAVOR" == "picoclaw" ]]; then
+        active_mode="picoclaw-local"
+        extra_mode_json=$(cat <<EOF
+[
+  {
+    "id": "picoclaw-local",
+    "title": "PicoClaw Local",
+    "subtitle": "PicoClaw + local Hailo model",
+    "kind": "http-chat",
+    "endpoint": "$ollama_chat_url",
+    "model": "$HAILO_MODEL"
+  }
+]
+EOF
+)
+    elif [[ "$CLAW_FLAVOR" == "zeroclaw" ]]; then
+        active_mode="zeroclaw-local"
+        extra_mode_json=$(cat <<EOF
+[
+  {
+    "id": "zeroclaw-local",
+    "title": "ZeroClaw Local",
+    "subtitle": "ZeroClaw + local Hailo model",
+    "kind": "http-chat",
+    "endpoint": "$ollama_chat_url",
+    "model": "$HAILO_MODEL"
+  }
+]
+EOF
+)
+    fi
+
+    cat > "$facade_runtime_path" <<EOF
+{
+  "schemaVersion": 1,
+  "flavor": "$CLAW_FLAVOR",
+  "gatewayUrl": "ws://127.0.0.1:18789",
+  "ollamaUrl": "$ollama_chat_url",
+  "ollamaModel": "$HAILO_MODEL",
+  "activeMode": "$active_mode",
+  "extraModes": $extra_mode_json
+}
+EOF
+    print_step "Wrote unified facade runtime profile: $facade_runtime_path"
 }
 
 #===============================================================================
@@ -1019,6 +1109,143 @@ EOF
     }
 }
 
+phase3_picoclaw_install() {
+    print_header "Phase 3: PicoClaw Installation"
+
+    if ! command -v go &> /dev/null; then
+        print_step "Installing Go toolchain for PicoClaw build..."
+        sudo apt update
+        sudo apt install -y golang-go make git
+    fi
+
+    local pico_dir="$HOME/.picoclaw-src"
+    if [[ -d "$pico_dir/.git" ]]; then
+        git -C "$pico_dir" pull --ff-only
+    else
+        git clone https://github.com/sipeed/picoclaw.git "$pico_dir"
+    fi
+
+    print_step "Building PicoClaw..."
+    make -C "$pico_dir" deps
+    make -C "$pico_dir" build
+    mkdir -p "$HOME/.local/bin"
+    install -m 0755 "$pico_dir/build/picoclaw" "$HOME/.local/bin/picoclaw"
+
+    mkdir -p "$HOME/.picoclaw"
+    cat > "$HOME/.picoclaw/config.json" << EOF
+{
+  "agents": {
+    "defaults": {
+      "workspace": "~/.picoclaw/workspace",
+      "restrict_to_workspace": true,
+      "model": "$HAILO_MODEL",
+      "max_tokens": 2048,
+      "temperature": 0.7,
+      "max_tool_iterations": 20
+    }
+  },
+  "providers": {
+    "ollama": {
+      "api_key": "hailo-local",
+      "api_base": "http://127.0.0.1:8081/v1"
+    }
+  },
+  "gateway": {
+    "host": "127.0.0.1",
+    "port": 18790
+  }
+}
+EOF
+
+    print_step "PicoClaw installed and configured for local Hailo endpoint"
+    write_unified_facade_runtime_profile
+}
+
+phase3_zeroclaw_install() {
+    print_header "Phase 3: ZeroClaw Installation"
+
+    if ! command -v cargo &> /dev/null; then
+        print_step "Installing Rust toolchain for ZeroClaw build..."
+        sudo apt update
+        sudo apt install -y cargo rustc git
+    fi
+
+    local zero_dir="$HOME/.zeroclaw-src"
+    if [[ -d "$zero_dir/.git" ]]; then
+        git -C "$zero_dir" pull --ff-only
+    else
+        git clone https://github.com/openagen/zeroclaw.git "$zero_dir"
+    fi
+
+    print_step "Building ZeroClaw (release)..."
+    local build_log
+    build_log=$(mktemp)
+
+    if ! cargo build --release --manifest-path "$zero_dir/Cargo.toml" >"$build_log" 2>&1; then
+        print_warn "ZeroClaw build failed with system Rust/cargo. Trying rustup stable toolchain..."
+
+        if ! command -v rustup &> /dev/null; then
+            print_step "Installing rustup (stable toolchain manager)..."
+            RUSTUP_INIT_SKIP_PATH_CHECK=yes curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
+        fi
+
+        # shellcheck disable=SC1090
+        source "$HOME/.cargo/env"
+        rustup toolchain install stable --profile minimal
+        rustup default stable
+
+        if ! cargo build --release --manifest-path "$zero_dir/Cargo.toml" >"$build_log" 2>&1; then
+            print_error "ZeroClaw build failed even with rustup stable"
+            tail -n 80 "$build_log" || true
+            rm -f "$build_log"
+            return 1
+        fi
+    fi
+
+    rm -f "$build_log"
+    mkdir -p "$HOME/.local/bin"
+    install -m 0755 "$zero_dir/target/release/zeroclaw" "$HOME/.local/bin/zeroclaw"
+
+    mkdir -p "$HOME/.zeroclaw"
+    cat > "$HOME/.zeroclaw/config.toml" << EOF
+api_key = "hailo-local"
+default_provider = "ollama"
+default_model = "$HAILO_MODEL"
+default_temperature = 0.7
+
+[gateway]
+host = "127.0.0.1"
+port = 3000
+require_pairing = true
+
+[autonomy]
+workspace_only = true
+
+[heartbeat]
+enabled = false
+interval_minutes = 30
+EOF
+
+    print_step "ZeroClaw installed (local Hailo defaults written to ~/.zeroclaw/config.toml)"
+    write_unified_facade_runtime_profile
+}
+
+phase3_install_selected_claw() {
+    CLAW_FLAVOR=$(normalize_claw_flavor "$CLAW_FLAVOR")
+    case "$CLAW_FLAVOR" in
+        picoclaw)
+            phase3_picoclaw_install
+            ;;
+        zeroclaw)
+            phase3_zeroclaw_install
+            ;;
+        *)
+            phase3_openclaw_install
+            write_unified_facade_runtime_profile
+            ;;
+    esac
+}
+
 #===============================================================================
 # Phase 4: Deploy Custom Configuration
 #===============================================================================
@@ -1442,6 +1669,29 @@ phase9_verification() {
     print_step "Verification complete"
 }
 
+phase9_verify_selected_claw() {
+    CLAW_FLAVOR=$(normalize_claw_flavor "$CLAW_FLAVOR")
+    case "$CLAW_FLAVOR" in
+        openclaw)
+            phase9_verification
+            ;;
+        picoclaw)
+            print_header "Phase 9: Verification (PicoClaw)"
+            if command -v "$HOME/.local/bin/picoclaw" >/dev/null 2>&1; then
+                "$HOME/.local/bin/picoclaw" --help >/dev/null 2>&1 || true
+            fi
+            print_step "PicoClaw binary verification complete"
+            ;;
+        zeroclaw)
+            print_header "Phase 9: Verification (ZeroClaw)"
+            if command -v "$HOME/.local/bin/zeroclaw" >/dev/null 2>&1; then
+                "$HOME/.local/bin/zeroclaw" --help >/dev/null 2>&1 || true
+            fi
+            print_step "ZeroClaw binary verification complete"
+            ;;
+    esac
+}
+
 #===============================================================================
 # Main
 #===============================================================================
@@ -1464,7 +1714,7 @@ main() {
     echo "  - Node.js 22+ (via n version manager)"
     echo "  - Docker (Trixie-specific)"
     echo "  - Hailo GenAI stack with qwen2:1.5b"
-    echo "  - OpenClaw with custom executive assistant config"
+    echo "  - Selected claw flavor (OpenClaw/PicoClaw/ZeroClaw) with local Hailo model wiring"
     echo "  - molt_tools skill for Moltbook integration"
     echo "  - First boot task: post to Moltbook"
     echo ""
@@ -1478,20 +1728,26 @@ main() {
         echo "Installation cancelled."
         exit 0
     fi
+
+    prompt_claw_flavor
     
     phase1_system_prep
     phase2_hailo_setup
-    phase3_openclaw_install
-    phase4_deploy_config
-    phase5_molt_tools
-    phase6_proactive_behaviors
-    phase7_channel_config
-    phase8_rag_setup
-    phase9_verification
+    phase3_install_selected_claw
+    if [[ "$CLAW_FLAVOR" == "openclaw" ]]; then
+        phase4_deploy_config
+        phase5_molt_tools
+        phase6_proactive_behaviors
+        phase7_channel_config
+        phase8_rag_setup
+    else
+        print_warn "Skipping OpenClaw-specific phases (4-8) for flavor: $CLAW_FLAVOR"
+    fi
+    phase9_verify_selected_claw
     
     print_header "Installation Complete!"
     
-    echo "OpenClaw is now installed and configured."
+    echo "Selected claw flavor is now installed and configured: $CLAW_FLAVOR"
     echo ""
     echo "Services:"
     echo "  hailo-ollama : systemd service on port 8000 (auto-starts on boot)"
@@ -1502,10 +1758,18 @@ main() {
     echo "  - Check Moltbook connection"
     echo "  - Post: \"i've been boxed into a Raspberry Pi !\""
     echo ""
-    echo "To start OpenClaw:"
-    echo "  openclaw gateway --port 18789 --verbose"
-    echo ""
-    echo "Dashboard: http://localhost:18789/"
+    if [[ "$CLAW_FLAVOR" == "openclaw" ]]; then
+        echo "To start OpenClaw:"
+        echo "  openclaw gateway --port 18789 --verbose"
+        echo ""
+        echo "Dashboard: http://localhost:18789/"
+    elif [[ "$CLAW_FLAVOR" == "picoclaw" ]]; then
+        echo "To start PicoClaw:"
+        echo "  ~/.local/bin/picoclaw gateway"
+    else
+        echo "To start ZeroClaw:"
+        echo "  ~/.local/bin/zeroclaw gateway"
+    fi
     echo ""
     print_step "Done!"
 }
