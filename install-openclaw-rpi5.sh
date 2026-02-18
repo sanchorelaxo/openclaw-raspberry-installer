@@ -102,7 +102,7 @@ normalize_claw_flavor() {
     local raw="${1:-openclaw}"
     raw=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')
     case "$raw" in
-        openclaw|picoclaw|zeroclaw)
+        openclaw|picoclaw|zeroclaw|nanobot|moltis)
             printf '%s' "$raw"
             ;;
         *)
@@ -118,11 +118,15 @@ prompt_claw_flavor() {
     echo "  1) OpenClaw (TypeScript)"
     echo "  2) PicoClaw (Go)"
     echo "  3) ZeroClaw (Rust)"
+    echo "  4) Nanobot (Python)"
+    echo "  5) Moltis (Rust)"
     echo ""
     local default_choice="1"
     case "$CLAW_FLAVOR" in
         picoclaw) default_choice="2" ;;
         zeroclaw) default_choice="3" ;;
+        nanobot) default_choice="4" ;;
+        moltis) default_choice="5" ;;
     esac
 
     local choice
@@ -130,14 +134,29 @@ prompt_claw_flavor() {
     case "$choice" in
         2) CLAW_FLAVOR="picoclaw" ;;
         3) CLAW_FLAVOR="zeroclaw" ;;
+        4) CLAW_FLAVOR="nanobot" ;;
+        5) CLAW_FLAVOR="moltis" ;;
         *) CLAW_FLAVOR="openclaw" ;;
     esac
     print_step "Selected assistant flavor: $CLAW_FLAVOR"
 }
 
+get_hailo_openai_base_url() {
+    if [[ "$USE_SANITIZER_PROXY_ON_OLLAMA" == "true" ]]; then
+        printf '%s' "http://127.0.0.1:8081/v1"
+    else
+        printf '%s' "http://127.0.0.1:8000/v1"
+    fi
+}
+
+get_hailo_chat_completions_url() {
+    printf '%s/chat/completions' "$(get_hailo_openai_base_url)"
+}
+
 write_unified_facade_runtime_profile() {
     local facade_runtime_path="$SCRIPT_DIR/templates/unified-chat-runtime.json"
-    local ollama_chat_url="http://127.0.0.1:8081/v1/chat/completions"
+    local ollama_chat_url
+    ollama_chat_url=$(get_hailo_chat_completions_url)
     local active_mode="ollama"
     local extra_mode_json="[]"
 
@@ -164,6 +183,36 @@ EOF
     "id": "zeroclaw-local",
     "title": "ZeroClaw Local",
     "subtitle": "ZeroClaw + local Hailo model",
+    "kind": "http-chat",
+    "endpoint": "$ollama_chat_url",
+    "model": "$HAILO_MODEL"
+  }
+]
+EOF
+)
+    elif [[ "$CLAW_FLAVOR" == "nanobot" ]]; then
+        active_mode="nanobot-local"
+        extra_mode_json=$(cat <<EOF
+[
+  {
+    "id": "nanobot-local",
+    "title": "Nanobot Local",
+    "subtitle": "Nanobot + local Hailo model",
+    "kind": "http-chat",
+    "endpoint": "$ollama_chat_url",
+    "model": "$HAILO_MODEL"
+  }
+]
+EOF
+)
+    elif [[ "$CLAW_FLAVOR" == "moltis" ]]; then
+        active_mode="moltis-local"
+        extra_mode_json=$(cat <<EOF
+[
+  {
+    "id": "moltis-local",
+    "title": "Moltis Local",
+    "subtitle": "Moltis + local Hailo model",
     "kind": "http-chat",
     "endpoint": "$ollama_chat_url",
     "model": "$HAILO_MODEL"
@@ -1008,10 +1057,8 @@ phase3_openclaw_install() {
     # If USE_SANITIZER_PROXY_ON_OLLAMA=true, we route through the proxy on port 8081.
     HAILO_PROVIDER_MODEL="ollama/${HAILO_MODEL:-qwen2:1.5b}"
     MODEL_ID="${HAILO_MODEL:-qwen2:1.5b}"
-    if [[ "$USE_SANITIZER_PROXY_ON_OLLAMA" == "true" ]]; then
-        MODEL_BASE_URL="http://127.0.0.1:8081/v1"
-    else
-        MODEL_BASE_URL="http://127.0.0.1:8000/v1"
+    MODEL_BASE_URL="$(get_hailo_openai_base_url)"
+    if [[ "$USE_SANITIZER_PROXY_ON_OLLAMA" != "true" ]]; then
         print_warn "Sanitizing proxy disabled; OpenClaw will call hailo-ollama directly"
     fi
     
@@ -1081,7 +1128,11 @@ phase3_openclaw_install() {
 }
 EOF
     
-    print_step "OpenClaw configured with Hailo-Ollama via sanitizing proxy"
+    if [[ "$USE_SANITIZER_PROXY_ON_OLLAMA" == "true" ]]; then
+        print_step "OpenClaw configured with Hailo-Ollama via sanitizing proxy"
+    else
+        print_step "OpenClaw configured with Hailo-Ollama direct endpoint"
+    fi
     print_step "Primary model: $HAILO_PROVIDER_MODEL (cost: \$0)"
     
     # Write auth profile so the agent can use the Ollama provider.
@@ -1111,6 +1162,9 @@ EOF
 
 phase3_picoclaw_install() {
     print_header "Phase 3: PicoClaw Installation"
+
+    local model_base_url
+    model_base_url="$(get_hailo_openai_base_url)"
 
     if ! command -v go &> /dev/null; then
         print_step "Installing Go toolchain for PicoClaw build..."
@@ -1148,7 +1202,7 @@ phase3_picoclaw_install() {
   "providers": {
     "ollama": {
       "api_key": "hailo-local",
-      "api_base": "http://127.0.0.1:8081/v1"
+      "api_base": "$model_base_url"
     }
   },
   "gateway": {
@@ -1160,12 +1214,15 @@ EOF
 
     cp "$HOME/.picoclaw/config.json" "$HOME/.config/picoclaw/config.json"
 
-    print_step "PicoClaw installed and configured for local Hailo endpoint"
+    print_step "PicoClaw installed and configured for local Hailo endpoint: $model_base_url"
     write_unified_facade_runtime_profile
 }
 
 phase3_zeroclaw_install() {
     print_header "Phase 3: ZeroClaw Installation"
+
+    local model_base_url
+    model_base_url="$(get_hailo_openai_base_url)"
 
     if ! command -v cargo &> /dev/null; then
         print_step "Installing Rust toolchain for ZeroClaw build..."
@@ -1212,7 +1269,7 @@ phase3_zeroclaw_install() {
     mkdir -p "$HOME/.zeroclaw"
     cat > "$HOME/.zeroclaw/config.toml" << EOF
 api_key = "hailo-local"
-default_provider = "custom:http://127.0.0.1:8081/v1"
+default_provider = "custom:$model_base_url"
 default_model = "$HAILO_MODEL"
 default_temperature = 0.7
 
@@ -1229,7 +1286,126 @@ enabled = false
 interval_minutes = 30
 EOF
 
-    print_step "ZeroClaw installed (local Hailo defaults written to ~/.zeroclaw/config.toml)"
+    print_step "ZeroClaw installed (local Hailo defaults written to ~/.zeroclaw/config.toml; endpoint=$model_base_url)"
+    write_unified_facade_runtime_profile
+}
+
+phase3_nanobot_install() {
+    print_header "Phase 3: Nanobot Installation"
+
+    local model_base_url
+    model_base_url="$(get_hailo_openai_base_url)"
+
+    if ! command -v pipx &> /dev/null; then
+        print_step "Installing pipx and Python venv support for Nanobot..."
+        sudo apt update
+        sudo apt install -y pipx python3-venv
+    fi
+
+    if ! command -v pipx &> /dev/null; then
+        print_error "pipx not available after install attempt"
+        return 1
+    fi
+
+    python3 -m pipx ensurepath >/dev/null 2>&1 || true
+
+    if pipx list 2>/dev/null | grep -q "package nanobot-ai"; then
+        print_step "Upgrading Nanobot (nanobot-ai) via pipx..."
+        pipx upgrade nanobot-ai
+    else
+        print_step "Installing Nanobot (nanobot-ai) via pipx..."
+        pipx install nanobot-ai
+    fi
+
+    mkdir -p "$HOME/.nanobot"
+    cat > "$HOME/.nanobot/config.json" << EOF
+{
+  "agents": {
+    "defaults": {
+      "workspace": "~/.nanobot/workspace",
+      "model": "$HAILO_MODEL",
+      "max_tokens": 2048,
+      "temperature": 0.7,
+      "max_tool_iterations": 20,
+      "memory_window": 50
+    }
+  },
+  "providers": {
+    "custom": {
+      "api_key": "hailo-local",
+      "api_base": "$model_base_url"
+    }
+  },
+  "gateway": {
+    "host": "127.0.0.1",
+    "port": 18790
+  },
+  "tools": {
+    "restrict_to_workspace": true
+  }
+}
+EOF
+
+    mkdir -p "$HOME/.nanobot/workspace"
+
+    print_step "Nanobot installed and configured for local Hailo endpoint: $model_base_url"
+    write_unified_facade_runtime_profile
+}
+
+phase3_moltis_install() {
+    print_header "Phase 3: Moltis Installation"
+
+    local model_base_url
+    model_base_url="$(get_hailo_openai_base_url)"
+
+    if ! command -v cargo &> /dev/null; then
+        print_step "Installing Rust toolchain for Moltis build..."
+        sudo apt update
+        sudo apt install -y cargo rustc git
+    fi
+
+    print_step "Installing Moltis via cargo (this may take several minutes)..."
+    if ! cargo install --locked --git https://github.com/moltis-org/moltis moltis; then
+        print_warn "Moltis install failed with system Rust/cargo. Trying rustup stable toolchain..."
+
+        if ! command -v rustup &> /dev/null; then
+            print_step "Installing rustup (stable toolchain manager)..."
+            RUSTUP_INIT_SKIP_PATH_CHECK=yes curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
+        fi
+
+        # shellcheck disable=SC1090
+        source "$HOME/.cargo/env"
+        rustup toolchain install stable --profile minimal
+        rustup default stable
+
+        cargo install --locked --git https://github.com/moltis-org/moltis moltis
+    fi
+
+    mkdir -p "$HOME/.local/bin"
+    if [[ -x "$HOME/.cargo/bin/moltis" ]]; then
+        install -m 0755 "$HOME/.cargo/bin/moltis" "$HOME/.local/bin/moltis"
+    else
+        print_error "Moltis binary not found at ~/.cargo/bin/moltis after install"
+        return 1
+    fi
+
+    mkdir -p "$HOME/.config/moltis"
+    mkdir -p "$HOME/.moltis"
+    cat > "$HOME/.config/moltis/moltis.toml" << EOF
+[providers]
+offered = ["ollama"]
+
+[providers.ollama]
+enabled = true
+base_url = "$model_base_url"
+models = ["$HAILO_MODEL"]
+fetch_models = false
+
+[chat]
+priority_models = ["$HAILO_MODEL"]
+EOF
+
+    print_step "Moltis installed and configured for local Hailo endpoint: $model_base_url"
     write_unified_facade_runtime_profile
 }
 
@@ -1241,6 +1417,12 @@ phase3_install_selected_claw() {
             ;;
         zeroclaw)
             phase3_zeroclaw_install
+            ;;
+        nanobot)
+            phase3_nanobot_install
+            ;;
+        moltis)
+            phase3_moltis_install
             ;;
         *)
             phase3_openclaw_install
@@ -1692,6 +1874,20 @@ phase9_verify_selected_claw() {
             fi
             print_step "ZeroClaw binary verification complete"
             ;;
+        nanobot)
+            print_header "Phase 9: Verification (Nanobot)"
+            if command -v "$HOME/.local/bin/nanobot" >/dev/null 2>&1; then
+                "$HOME/.local/bin/nanobot" --version >/dev/null 2>&1 || true
+            fi
+            print_step "Nanobot binary verification complete"
+            ;;
+        moltis)
+            print_header "Phase 9: Verification (Moltis)"
+            if command -v "$HOME/.local/bin/moltis" >/dev/null 2>&1; then
+                "$HOME/.local/bin/moltis" --version >/dev/null 2>&1 || true
+            fi
+            print_step "Moltis binary verification complete"
+            ;;
     esac
 }
 
@@ -1717,7 +1913,7 @@ main() {
     echo "  - Node.js 22+ (via n version manager)"
     echo "  - Docker (Trixie-specific)"
     echo "  - Hailo GenAI stack with qwen2:1.5b"
-    echo "  - Selected claw flavor (OpenClaw/PicoClaw/ZeroClaw) with local Hailo model wiring"
+    echo "  - Selected claw flavor (OpenClaw/PicoClaw/ZeroClaw/Nanobot/Moltis) with local Hailo model wiring"
     echo "  - molt_tools skill for Moltbook integration"
     echo "  - First boot task: post to Moltbook"
     echo ""
@@ -1769,9 +1965,17 @@ main() {
     elif [[ "$CLAW_FLAVOR" == "picoclaw" ]]; then
         echo "To start PicoClaw:"
         echo "  ~/.local/bin/picoclaw gateway"
-    else
+    elif [[ "$CLAW_FLAVOR" == "zeroclaw" ]]; then
         echo "To start ZeroClaw:"
         echo "  ~/.local/bin/zeroclaw gateway"
+    elif [[ "$CLAW_FLAVOR" == "nanobot" ]]; then
+        echo "To start Nanobot:"
+        echo "  ~/.local/bin/nanobot gateway"
+        echo "  ~/.local/bin/nanobot agent"
+    else
+        echo "To start Moltis:"
+        echo "  ~/.local/bin/moltis"
+        echo "  ~/.local/bin/moltis agent --message \"Hello\""
     fi
     echo ""
     print_step "Done!"

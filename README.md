@@ -1,6 +1,6 @@
 # OpenClaw Raspberry Pi 5 GenAI Kit Installer
 
-Automated installer for local AI assistants on Raspberry Pi 5 + Hailo-10H (AI HAT+ 2), with selectable flavor: OpenClaw, PicoClaw, or ZeroClaw.
+Automated installer for local AI assistants on Raspberry Pi 5 + Hailo-10H (AI HAT+ 2), with selectable flavor: OpenClaw, PicoClaw, ZeroClaw, Nanobot, or Moltis.
 
 ## Quick navigation
 
@@ -25,7 +25,7 @@ This project installs and configures a local assistant stack on Raspberry Pi:
 
 1. System/runtime dependencies (Node, Docker, etc.)
 2. Hailo GenAI stack (`hailo-ollama`) and optional sanitizing proxy
-3. Selected assistant flavor (`openclaw`, `picoclaw`, or `zeroclaw`)
+3. Selected assistant flavor (`openclaw`, `picoclaw`, `zeroclaw`, `nanobot`, or `moltis`)
 4. Optional OpenClaw-only extras (molt_tools, channel setup, RAG)
 5. Validation and SSH test scripts
 
@@ -36,6 +36,8 @@ For the main entrypoint see [`install-openclaw-rpi5.sh`](./install-openclaw-rpi5
 - **`openclaw`** (default): full OpenClaw flow including OpenClaw-specific phases.
 - **`picoclaw`**: full PicoClaw install/build + local Hailo model wiring.
 - **`zeroclaw`**: full ZeroClaw install/build + local Hailo model wiring.
+- **`nanobot`**: Nanobot install + local Hailo OpenAI-compatible wiring.
+- **`moltis`**: Moltis install + local Hailo OpenAI-compatible wiring.
 
 Set via environment:
 
@@ -43,6 +45,8 @@ Set via environment:
 CLAW_FLAVOR=openclaw ./install-openclaw-rpi5.sh
 CLAW_FLAVOR=picoclaw ./install-openclaw-rpi5.sh
 CLAW_FLAVOR=zeroclaw ./install-openclaw-rpi5.sh
+CLAW_FLAVOR=nanobot ./install-openclaw-rpi5.sh
+CLAW_FLAVOR=moltis ./install-openclaw-rpi5.sh
 ```
 
 If omitted, installer prompts interactively.
@@ -110,7 +114,7 @@ See source for exact behavior: [`install-openclaw-rpi5.sh`](./install-openclaw-r
 
 - **Phase 1**: system preparation (packages, Node, Docker)
 - **Phase 2**: Hailo setup + `hailo-ollama` + optional `hailo-sanitize-proxy`
-- **Phase 3**: selected flavor install (`openclaw` / `picoclaw` / `zeroclaw`)
+- **Phase 3**: selected flavor install (`openclaw` / `picoclaw` / `zeroclaw` / `nanobot` / `moltis`)
 - **Phase 9**: verification
 
 ### OpenClaw-only phases
@@ -150,7 +154,7 @@ See [`./.env.example`](./.env.example) for complete examples.
 
 Key flags:
 
-- `CLAW_FLAVOR` (`openclaw|picoclaw|zeroclaw`)
+- `CLAW_FLAVOR` (`openclaw|picoclaw|zeroclaw|nanobot|moltis`)
 - `USE_SANITIZER_PROXY_ON_OLLAMA`
 - `USE_OPENCLAW_TOOLS` (OpenClaw-specific)
 - `HAILO_MODEL`
@@ -192,6 +196,7 @@ This validates:
 - flavor/runtime profile alignment
 - facade runtime-profile integration
 - direct-vs-proxy compatibility matrix for Hailo endpoints
+- proxy OpenAI model discovery compatibility (`/v1/models`)
 
 ## Troubleshooting
 

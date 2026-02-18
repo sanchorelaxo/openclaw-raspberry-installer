@@ -11,6 +11,7 @@ Key functions:
 3. Force stream:false, convert response to SSE if client requested streaming
 4. Fix response: nanosecond timestamps, missing usage/system_fingerprint
 5. Fake /api/show to avoid hailo-ollama DTO crash
+6. Expose /v1/models for OpenAI-compatible model discovery clients
 
 Listens on port 8081, forwards to hailo-ollama on port 8000.
 """
@@ -27,6 +28,7 @@ import urllib.error
 
 LISTEN_PORT = 8081
 UPSTREAM = "http://127.0.0.1:8000"
+DEFAULT_MODEL_ID = os.environ.get("HAILO_MODEL", "qwen2:1.5b")
 WORKSPACE_SKILLS_DIR = os.path.expanduser("~/.openclaw/workspace/skills")
 MAX_TOOL_DESCRIPTION_CHARS = 120
 MAX_TOOL_COUNT_IN_PROMPT = 8
@@ -759,6 +761,87 @@ def fake_api_show(body_bytes):
     }).encode("utf-8")
 
 
+def _unique_model_ids(values):
+    seen = set()
+    ordered = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        model_id = value.strip()
+        if not model_id:
+            continue
+        if model_id in seen:
+            continue
+        seen.add(model_id)
+        ordered.append(model_id)
+    return ordered
+
+
+def discover_upstream_model_ids():
+    """Discover models from upstream `/api/tags` with local fallback."""
+    tags_url = "%s/api/tags" % UPSTREAM
+    discovered = []
+
+    try:
+        req = urllib.request.Request(tags_url, method="GET")
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            payload = json.loads(resp.read())
+    except Exception:
+        payload = None
+
+    if isinstance(payload, dict):
+        rows = payload.get("models")
+        if isinstance(rows, list):
+            for row in rows:
+                if isinstance(row, dict):
+                    name = row.get("name") or row.get("model") or row.get("id")
+                else:
+                    name = row
+                if isinstance(name, str):
+                    discovered.append(name)
+
+        rows = payload.get("data")
+        if isinstance(rows, list):
+            for row in rows:
+                if isinstance(row, dict):
+                    name = row.get("id") or row.get("name") or row.get("model")
+                else:
+                    name = row
+                if isinstance(name, str):
+                    discovered.append(name)
+
+    models = _unique_model_ids(discovered)
+    if not models:
+        models = [DEFAULT_MODEL_ID]
+    return models
+
+
+def fake_v1_models_list():
+    now = int(time.time())
+    models = [
+        {
+            "id": model_id,
+            "object": "model",
+            "created": now,
+            "owned_by": "hailo-ollama",
+        }
+        for model_id in discover_upstream_model_ids()
+    ]
+    return json.dumps({"object": "list", "data": models}).encode("utf-8")
+
+
+def fake_v1_model(model_id):
+    now = int(time.time())
+    return json.dumps(
+        {
+            "id": model_id,
+            "object": "model",
+            "created": now,
+            "owned_by": "hailo-ollama",
+        }
+    ).encode("utf-8")
+
+
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self._proxy("GET")
@@ -868,6 +951,33 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(200, resp_body)
             sys.stderr.write(
                 "hailo-sanitize-proxy[%s]: %s %s -> 200 faked duration_ms=%d\n"
+                % (trace_id, method, path, int((time.time() - started) * 1000))
+            )
+            sys.stderr.flush()
+            return
+
+        # OpenAI-compatible model discovery for clients (Nanobot, Moltis, etc.)
+        if path == "/v1/models" and method == "GET":
+            resp_body = fake_v1_models_list()
+            _write_trace(trace_id, "proxy-response.fake-v1-models", resp_body)
+            self._send_json(200, resp_body)
+            sys.stderr.write(
+                "hailo-sanitize-proxy[%s]: %s %s -> 200 faked model list duration_ms=%d\n"
+                % (trace_id, method, path, int((time.time() - started) * 1000))
+            )
+            sys.stderr.flush()
+            return
+
+        if path.startswith("/v1/models/") and method == "GET":
+            model_id = path.split("/v1/models/", 1)[1].strip()
+            if not model_id:
+                self._send_json(404, b'{"error":"model not found"}')
+                return
+            resp_body = fake_v1_model(model_id)
+            _write_trace(trace_id, "proxy-response.fake-v1-model", resp_body)
+            self._send_json(200, resp_body)
+            sys.stderr.write(
+                "hailo-sanitize-proxy[%s]: %s %s -> 200 faked model detail duration_ms=%d\n"
                 % (trace_id, method, path, int((time.time() - started) * 1000))
             )
             sys.stderr.flush()

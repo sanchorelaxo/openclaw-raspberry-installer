@@ -99,6 +99,50 @@ EOF"
 }
 EOF"
       ;;
+    nanobot)
+      run_ssh "cat > '$runtime_path' <<'EOF'
+{
+  \"schemaVersion\": 1,
+  \"flavor\": \"nanobot\",
+  \"gatewayUrl\": \"ws://127.0.0.1:18789\",
+  \"ollamaUrl\": \"http://127.0.0.1:8081/v1/chat/completions\",
+  \"ollamaModel\": \"$TEST_HAILO_MODEL\",
+  \"activeMode\": \"nanobot-local\",
+  \"extraModes\": [
+    {
+      \"id\": \"nanobot-local\",
+      \"title\": \"Nanobot Local\",
+      \"subtitle\": \"Nanobot + local Hailo model\",
+      \"kind\": \"http-chat\",
+      \"endpoint\": \"http://127.0.0.1:8081/v1/chat/completions\",
+      \"model\": \"$TEST_HAILO_MODEL\"
+    }
+  ]
+}
+EOF"
+      ;;
+    moltis)
+      run_ssh "cat > '$runtime_path' <<'EOF'
+{
+  \"schemaVersion\": 1,
+  \"flavor\": \"moltis\",
+  \"gatewayUrl\": \"ws://127.0.0.1:18789\",
+  \"ollamaUrl\": \"http://127.0.0.1:8081/v1/chat/completions\",
+  \"ollamaModel\": \"$TEST_HAILO_MODEL\",
+  \"activeMode\": \"moltis-local\",
+  \"extraModes\": [
+    {
+      \"id\": \"moltis-local\",
+      \"title\": \"Moltis Local\",
+      \"subtitle\": \"Moltis + local Hailo model\",
+      \"kind\": \"http-chat\",
+      \"endpoint\": \"http://127.0.0.1:8081/v1/chat/completions\",
+      \"model\": \"$TEST_HAILO_MODEL\"
+    }
+  ]
+}
+EOF"
+      ;;
     *)
       fail "Unsupported flavor for runtime profile write: $flavor"
       ;;
@@ -122,7 +166,7 @@ check_profile_shape() {
 
   local flavor
   flavor=$(printf '%s\n' "$profile_summary" | awk -F= '/^flavor=/{print $2}')
-  [[ "$flavor" =~ ^(openclaw|picoclaw|zeroclaw)$ ]] || fail "Invalid flavor in runtime profile: $flavor"
+  [[ "$flavor" =~ ^(openclaw|picoclaw|zeroclaw|nanobot|moltis)$ ]] || fail "Invalid flavor in runtime profile: $flavor"
 
   local url
   url=$(printf '%s\n' "$profile_summary" | awk -F= '/^ollamaUrl=/{print $2}')
@@ -158,6 +202,20 @@ def post(url, payload):
             return e.code, body
         return 599, str(e)
 
+def get(url):
+    req=urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=25) as r:
+            return r.status, r.read().decode(errors="replace")
+    except Exception as e:
+        if hasattr(e, "code"):
+            try:
+                body=e.read().decode(errors="replace")
+            except Exception:
+                body=str(e)
+            return e.code, body
+        return 599, str(e)
+
 base="http://127.0.0.1:8000"
 proxy="http://127.0.0.1:8081"
 min_payload={"model":"qwen2:1.5b","messages":[{"role":"user","content":"Reply OK"}],"stream":False}
@@ -176,19 +234,28 @@ for name,url,p in [
     status, body = post(url,p)
     rows.append((name,status,body[:120].replace("\n"," ")))
 
+for name, url in [
+  ("direct_models", base+"/v1/models"),
+  ("proxy_models", proxy+"/v1/models"),
+]:
+    status, body = get(url)
+    rows.append((name, status, body[:120].replace("\n", " ")))
+
 for n,s,b in rows:
     print(f"{n}|{s}|{b}")
 PY')
   log "$matrix"
 
-  local direct_oc_status direct_show_status proxy_oc_status proxy_show_status
+  local direct_oc_status direct_show_status proxy_oc_status proxy_show_status proxy_models_status
   direct_oc_status=$(printf '%s\n' "$matrix" | awk -F'|' '/^direct_oc_like\|/{print $2}')
   direct_show_status=$(printf '%s\n' "$matrix" | awk -F'|' '/^direct_show\|/{print $2}')
   proxy_oc_status=$(printf '%s\n' "$matrix" | awk -F'|' '/^proxy_oc_like\|/{print $2}')
   proxy_show_status=$(printf '%s\n' "$matrix" | awk -F'|' '/^proxy_show\|/{print $2}')
+  proxy_models_status=$(printf '%s\n' "$matrix" | awk -F'|' '/^proxy_models\|/{print $2}')
 
   [[ "$proxy_oc_status" == "200" ]] || fail "Proxy OpenClaw-like chat failed (status=$proxy_oc_status)"
   [[ "$proxy_show_status" == "200" ]] || fail "Proxy /api/show failed (status=$proxy_show_status)"
+  [[ "$proxy_models_status" == "200" ]] || fail "Proxy /v1/models failed (status=$proxy_models_status)"
 
   if [[ "$direct_oc_status" != "200" || "$direct_show_status" != "200" ]]; then
     pass "Proxy required signal confirmed for OpenClaw-like traffic"
@@ -219,6 +286,20 @@ check_flavor_binary_and_mode_alignment() {
       extra_count=$(json_read_remote "$RUNTIME_PROFILE_REL" 'print(len(obj.get("extraModes") or []))' | tr -d '[:space:]')
       [[ "$extra_count" -ge 1 ]] || fail "ZeroClaw profile missing conditional extra modes"
       pass "ZeroClaw flavor aligned with runtime profile and binary"
+      ;;
+    nanobot)
+      run_ssh "test -x ~/.local/bin/nanobot || command -v nanobot >/dev/null 2>&1" || fail "Nanobot binary missing"
+      local extra_count
+      extra_count=$(json_read_remote "$RUNTIME_PROFILE_REL" 'print(len(obj.get("extraModes") or []))' | tr -d '[:space:]')
+      [[ "$extra_count" -ge 1 ]] || fail "Nanobot profile missing conditional extra modes"
+      pass "Nanobot flavor aligned with runtime profile and binary"
+      ;;
+    moltis)
+      run_ssh "test -x ~/.local/bin/moltis || command -v moltis >/dev/null 2>&1" || fail "Moltis binary missing"
+      local extra_count
+      extra_count=$(json_read_remote "$RUNTIME_PROFILE_REL" 'print(len(obj.get("extraModes") or []))' | tr -d '[:space:]')
+      [[ "$extra_count" -ge 1 ]] || fail "Moltis profile missing conditional extra modes"
+      pass "Moltis flavor aligned with runtime profile and binary"
       ;;
     *)
       fail "Unknown flavor from profile: $flavor"
@@ -296,6 +377,40 @@ check_flavor_health_and_simple_queries() {
 
       pass "ZeroClaw health + simple query checks passed"
       ;;
+    nanobot)
+      log "== Nanobot health + simple query checks =="
+      run_ssh 'test -x ~/.local/bin/nanobot || command -v nanobot >/dev/null 2>&1' || fail "Nanobot binary missing for health checks"
+
+      local nanobot_status
+      nanobot_status=$(run_ssh '~/.local/bin/nanobot status') || fail "nanobot status failed"
+      printf '%s\n' "$nanobot_status" | grep -Eiq '(Config:|Model:)' || fail "nanobot status output missing expected info"
+
+      local nanobot_response1 nanobot_response2
+      nanobot_response1=$(run_ssh '~/.local/bin/nanobot agent --message "Reply with only OK."') || fail "Nanobot simple query #1 failed"
+      printf '%s\n' "$nanobot_response1" | grep -Eiq '(^|[^a-z0-9])ok([^a-z0-9]|$)' || fail "Nanobot simple query #1 did not return OK"
+
+      nanobot_response2=$(run_ssh '~/.local/bin/nanobot agent --message "What is 2+2? Reply with only the answer."') || fail "Nanobot simple query #2 failed"
+      printf '%s\n' "$nanobot_response2" | grep -Eiq '(^|[^a-z0-9])(4|four)([^a-z0-9]|$)' || fail "Nanobot simple query #2 did not return expected answer"
+
+      pass "Nanobot health + simple query checks passed"
+      ;;
+    moltis)
+      log "== Moltis health + simple query checks =="
+      run_ssh 'test -x ~/.local/bin/moltis || command -v moltis >/dev/null 2>&1' || fail "Moltis binary missing for health checks"
+
+      local moltis_models
+      moltis_models=$(run_ssh '~/.local/bin/moltis --log-level error models') || fail "moltis models failed"
+      printf '%s\n' "$moltis_models" | grep -Eiq '(ollama|qwen|model)' || fail "moltis models output missing expected info"
+
+      local moltis_response1 moltis_response2
+      moltis_response1=$(run_ssh '~/.local/bin/moltis --log-level error agent --message "Reply with only OK."') || fail "Moltis simple query #1 failed"
+      printf '%s\n' "$moltis_response1" | grep -Eiq '(^|[^a-z0-9])ok([^a-z0-9]|$)' || fail "Moltis simple query #1 did not return OK"
+
+      moltis_response2=$(run_ssh '~/.local/bin/moltis --log-level error agent --message "What is 2+2? Reply with only the answer."') || fail "Moltis simple query #2 failed"
+      printf '%s\n' "$moltis_response2" | grep -Eiq '(^|[^a-z0-9])(4|four)([^a-z0-9]|$)' || fail "Moltis simple query #2 did not return expected answer"
+
+      pass "Moltis health + simple query checks passed"
+      ;;
     *)
       fail "Unknown flavor from profile: $flavor"
       ;;
@@ -307,7 +422,7 @@ main() {
 
   if [[ "$RUN_ALL_FLAVORS" == "true" ]]; then
     local flavor
-    for flavor in openclaw picoclaw zeroclaw; do
+    for flavor in openclaw picoclaw zeroclaw nanobot moltis; do
       log "==== Testing flavor: $flavor ===="
       write_runtime_profile_for_flavor "$flavor"
       run_checks_for_current_profile_flavor
