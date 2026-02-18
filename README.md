@@ -195,8 +195,10 @@ This validates:
 
 - flavor/runtime profile alignment
 - facade runtime-profile integration
+- facade intermediary HTTP-chat path (`runtime profile -> facade mode -> proxy -> hailo-ollama`)
 - direct-vs-proxy compatibility matrix for Hailo endpoints
 - proxy OpenAI model discovery compatibility (`/v1/models`)
+- exhaustive flavor matrix via `RUN_ALL_FLAVORS=true` (`openclaw`, `picoclaw`, `zeroclaw`, `nanobot`, `moltis`)
 
 ## Troubleshooting
 

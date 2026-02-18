@@ -24,6 +24,7 @@ PREPARE_OFFLINE=false
 USE_SANITIZER_PROXY_ON_OLLAMA=${USE_SANITIZER_PROXY_ON_OLLAMA:-true}
 USE_OPENCLAW_TOOLS=${USE_OPENCLAW_TOOLS:-true}
 CLAW_FLAVOR=${CLAW_FLAVOR:-openclaw}
+UNIFIED_FACADE_HTTP_PORT=${UNIFIED_FACADE_HTTP_PORT:-8787}
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -234,6 +235,55 @@ EOF
 }
 EOF
     print_step "Wrote unified facade runtime profile: $facade_runtime_path"
+}
+
+install_unified_facade_http_service() {
+    local facade_server_src="$SCRIPT_DIR/scripts/unified-chat-facade-httpd.py"
+    local facade_server_dst="/usr/local/bin/unified-chat-facade-httpd.py"
+
+    if [[ ! -f "$facade_server_src" ]]; then
+        print_warn "Unified facade server script not found: $facade_server_src"
+        return 0
+    fi
+
+    print_step "Installing unified facade HTTP server systemd service (debug logs enabled)..."
+    sudo cp "$facade_server_src" "$facade_server_dst"
+    sudo chmod +x "$facade_server_dst"
+
+    sudo tee /etc/systemd/system/unified-chat-facade.service > /dev/null <<EOF
+[Unit]
+Description=Unified Chat Facade HTTP Server
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=$USER
+Group=$USER
+WorkingDirectory=$SCRIPT_DIR
+Environment=PYTHONUNBUFFERED=1
+Environment=UNIFIED_CHAT_FACADE_LOG_LEVEL=DEBUG
+ExecStart=/usr/bin/python3 /usr/local/bin/unified-chat-facade-httpd.py --bind 127.0.0.1 --port $UNIFIED_FACADE_HTTP_PORT --directory $SCRIPT_DIR --log-level DEBUG
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=unified-chat-facade
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable unified-chat-facade.service
+    sudo systemctl restart unified-chat-facade.service
+
+    sleep 1
+    if sudo systemctl is-active --quiet unified-chat-facade.service; then
+        print_step "Unified facade HTTP server running on http://127.0.0.1:$UNIFIED_FACADE_HTTP_PORT"
+    else
+        print_warn "Unified facade HTTP server failed to start — check: journalctl -u unified-chat-facade -n 100"
+    fi
 }
 
 #===============================================================================
@@ -1933,6 +1983,7 @@ main() {
     phase1_system_prep
     phase2_hailo_setup
     phase3_install_selected_claw
+    install_unified_facade_http_service
     if [[ "$CLAW_FLAVOR" == "openclaw" ]]; then
         phase4_deploy_config
         phase5_molt_tools
@@ -1952,6 +2003,9 @@ main() {
     echo "  hailo-ollama : systemd service on port 8000 (auto-starts on boot)"
     echo "    sudo systemctl status hailo-ollama"
     echo "    sudo journalctl -u hailo-ollama -f"
+    echo "  unified-chat-facade : systemd static HTTP server on port $UNIFIED_FACADE_HTTP_PORT"
+    echo "    sudo systemctl status unified-chat-facade"
+    echo "    sudo journalctl -u unified-chat-facade -f"
     echo ""
     echo "First boot task:"
     echo "  - Check Moltbook connection"
@@ -1977,6 +2031,8 @@ main() {
         echo "  ~/.local/bin/moltis"
         echo "  ~/.local/bin/moltis agent --message \"Hello\""
     fi
+    echo ""
+    echo "Unified facade URL: http://127.0.0.1:$UNIFIED_FACADE_HTTP_PORT/templates/unified-chat-facade.html"
     echo ""
     print_step "Done!"
 }

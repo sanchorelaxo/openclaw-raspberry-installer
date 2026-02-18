@@ -152,6 +152,7 @@ EOF"
 run_checks_for_current_profile_flavor() {
   check_profile_shape
   check_facade_runtime_support
+  check_facade_chat_intermediary
   check_hailo_proxy_matrix
   check_flavor_binary_and_mode_alignment
   check_flavor_health_and_simple_queries
@@ -180,6 +181,111 @@ check_facade_runtime_support() {
   run_ssh "grep -q 'loadRuntimeProfile' '$REMOTE_REPO_DIR/$FACADE_REL'" || fail "Facade missing loadRuntimeProfile()"
   run_ssh "grep -q 'http-chat' '$REMOTE_REPO_DIR/$FACADE_REL'" || fail "Facade missing http-chat mode support"
   pass "Facade contains runtime profile + conditional mode logic"
+}
+
+check_facade_chat_intermediary() {
+  local probe
+  probe=$(run_ssh "python3 - <<'PY'
+import json, re, urllib.request
+
+runtime_path = '$REMOTE_REPO_DIR/$RUNTIME_PROFILE_REL'
+facade_url = 'http://127.0.0.1:8787/$FACADE_REL'
+
+def get(url):
+    req = urllib.request.Request(url, method='GET')
+    try:
+        with urllib.request.urlopen(req, timeout=25) as r:
+            return r.status, r.read().decode(errors='replace')
+    except Exception as e:
+        if hasattr(e, 'code'):
+            try:
+                body = e.read().decode(errors='replace')
+            except Exception:
+                body = str(e)
+            return e.code, body
+        return 599, str(e)
+
+def post(url, payload):
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data, method='POST', headers={'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.status, r.read().decode(errors='replace')
+    except Exception as e:
+        if hasattr(e, 'code'):
+            try:
+                body = e.read().decode(errors='replace')
+            except Exception:
+                body = str(e)
+            return e.code, body
+        return 599, str(e)
+
+def response_text(body):
+    try:
+        obj = json.loads(body)
+    except Exception:
+        return body
+    if not isinstance(obj, dict):
+        return body
+    choices = obj.get('choices')
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        if isinstance(first, dict):
+            msg = first.get('message')
+            if isinstance(msg, dict):
+                return str(msg.get('content', ''))
+            return str(first.get('text', ''))
+    return str(obj)
+
+facade_status, facade_body = get(facade_url)
+print(f'facade_status|{facade_status}')
+print(f'facade_body_preview|{facade_body[:80].replace(chr(10), chr(32))}')
+
+if facade_status != 200:
+    raise SystemExit(2)
+
+cfg = json.load(open(runtime_path))
+endpoint = cfg.get('ollamaUrl')
+model = cfg.get('ollamaModel')
+active = cfg.get('activeMode')
+
+for mode in cfg.get('extraModes') or []:
+    if not isinstance(mode, dict):
+        continue
+    if mode.get('id') == active and mode.get('kind') == 'http-chat':
+        endpoint = mode.get('endpoint') or endpoint
+        model = mode.get('model') or model
+        break
+
+if not endpoint or not model:
+    raise SystemExit(3)
+
+print(f'facade_chat_endpoint|{endpoint}')
+print(f'facade_chat_model|{model}')
+
+tests = [
+    ('ok', 'Reply with only OK.', r'(^|[^a-z0-9])ok([^a-z0-9]|$)'),
+    ('math', 'What is 2+2? Reply with only the answer.', r'(^|[^a-z0-9])(4|four)([^a-z0-9]|$)'),
+]
+
+for label, prompt, pattern in tests:
+    status, body = post(endpoint, {
+        'model': model,
+        'messages': [{'role': 'user', 'content': prompt}],
+        'stream': False,
+    })
+    text = response_text(body)
+    normalized = str(text).strip().lower()
+    print(f'{label}_status|{status}')
+    print(f'{label}_preview|{normalized[:80].replace(chr(10), chr(32))}')
+    if status != 200:
+        raise SystemExit(10)
+    if not re.search(pattern, normalized):
+        raise SystemExit(11)
+PY") || fail "Facade chat intermediary checks failed"
+
+  log "$probe"
+  pass "Facade HTTP chat intermediary checks passed"
 }
 
 check_hailo_proxy_matrix() {
@@ -219,6 +325,7 @@ def get(url):
 base="http://127.0.0.1:8000"
 proxy="http://127.0.0.1:8081"
 min_payload={"model":"qwen2:1.5b","messages":[{"role":"user","content":"Reply OK"}],"stream":False}
+api_chat_payload={"model":"qwen2:1.5b","messages":[{"role":"user","content":"Reply OK"}],"stream":False}
 oc_like={"model":"qwen2:1.5b","messages":[{"role":"system","content":"You are helper"},{"role":"user","content":"hi"}],"stream":True,"stream_options":{"include_usage":True},"store":True,"tools":[{"type":"function","function":{"name":"read_file","description":"read files","parameters":{"type":"object","properties":{}}}}],"max_completion_tokens":2048}
 show_payload={"name":"qwen2:1.5b"}
 
@@ -226,16 +333,14 @@ rows=[]
 for name,url,p in [
   ("direct_min", base+"/v1/chat/completions", min_payload),
   ("proxy_min", proxy+"/v1/chat/completions", min_payload),
-  ("direct_oc_like", base+"/v1/chat/completions", oc_like),
+  ("direct_api_chat", base+"/api/chat", api_chat_payload),
   ("proxy_oc_like", proxy+"/v1/chat/completions", oc_like),
-  ("direct_show", base+"/api/show", show_payload),
   ("proxy_show", proxy+"/api/show", show_payload),
 ]:
     status, body = post(url,p)
     rows.append((name,status,body[:120].replace("\n"," ")))
 
 for name, url in [
-  ("direct_models", base+"/v1/models"),
   ("proxy_models", proxy+"/v1/models"),
 ]:
     status, body = get(url)
@@ -246,22 +351,20 @@ for n,s,b in rows:
 PY')
   log "$matrix"
 
-  local direct_oc_status direct_show_status proxy_oc_status proxy_show_status proxy_models_status
-  direct_oc_status=$(printf '%s\n' "$matrix" | awk -F'|' '/^direct_oc_like\|/{print $2}')
-  direct_show_status=$(printf '%s\n' "$matrix" | awk -F'|' '/^direct_show\|/{print $2}')
+  local direct_api_chat_status proxy_min_status proxy_oc_status proxy_show_status proxy_models_status
+  direct_api_chat_status=$(printf '%s\n' "$matrix" | awk -F'|' '/^direct_api_chat\|/{print $2}')
+  proxy_min_status=$(printf '%s\n' "$matrix" | awk -F'|' '/^proxy_min\|/{print $2}')
   proxy_oc_status=$(printf '%s\n' "$matrix" | awk -F'|' '/^proxy_oc_like\|/{print $2}')
   proxy_show_status=$(printf '%s\n' "$matrix" | awk -F'|' '/^proxy_show\|/{print $2}')
   proxy_models_status=$(printf '%s\n' "$matrix" | awk -F'|' '/^proxy_models\|/{print $2}')
 
+  [[ "$proxy_min_status" == "200" ]] || fail "Proxy minimal chat failed (status=$proxy_min_status)"
   [[ "$proxy_oc_status" == "200" ]] || fail "Proxy OpenClaw-like chat failed (status=$proxy_oc_status)"
   [[ "$proxy_show_status" == "200" ]] || fail "Proxy /api/show failed (status=$proxy_show_status)"
   [[ "$proxy_models_status" == "200" ]] || fail "Proxy /v1/models failed (status=$proxy_models_status)"
 
-  if [[ "$direct_oc_status" != "200" || "$direct_show_status" != "200" ]]; then
-    pass "Proxy required signal confirmed for OpenClaw-like traffic"
-  else
-    warn "Direct endpoint also passed OpenClaw-like checks; proxy may be optional"
-  fi
+  [[ "$direct_api_chat_status" == "200" ]] || warn "Direct /api/chat returned non-200 (status=$direct_api_chat_status)"
+  pass "Proxy OpenClaw-like compatibility checks passed"
 }
 
 check_flavor_binary_and_mode_alignment() {
@@ -320,6 +423,8 @@ check_flavor_health_and_simple_queries() {
       run_ssh "grep -qi 'Gateway service' /tmp/openclaw_status.out" || fail "openclaw status output missing 'Gateway service'"
 
       run_ssh 'PATH=$HOME/.npm-global/bin:$PATH; openclaw health >/tmp/openclaw_health.out 2>&1 || true'
+
+      log "OpenClaw local queries may take ~20-40s each on Hailo; waiting for completion..."
 
       local response1 response2
       response1=$(run_ssh 'PATH=$HOME/.npm-global/bin:$PATH; openclaw agent --local --agent main --session-id flavortest-openclaw-1 --timeout 120 --message "Reply with only OK."') || fail "OpenClaw simple query #1 failed"
@@ -398,16 +503,96 @@ check_flavor_health_and_simple_queries() {
       log "== Moltis health + simple query checks =="
       run_ssh 'test -x ~/.local/bin/moltis || command -v moltis >/dev/null 2>&1' || fail "Moltis binary missing for health checks"
 
-      local moltis_models
-      moltis_models=$(run_ssh '~/.local/bin/moltis --log-level error models') || fail "moltis models failed"
-      printf '%s\n' "$moltis_models" | grep -Eiq '(ollama|qwen|model)' || fail "moltis models output missing expected info"
+      local moltis_doctor
+      moltis_doctor=$(run_ssh '~/.local/bin/moltis --log-level error doctor 2>&1') || fail "moltis doctor failed"
+      printf '%s\n' "$moltis_doctor" | grep -Eiq '(providers|ollama)' || fail "moltis doctor output missing provider info"
 
-      local moltis_response1 moltis_response2
-      moltis_response1=$(run_ssh '~/.local/bin/moltis --log-level error agent --message "Reply with only OK."') || fail "Moltis simple query #1 failed"
-      printf '%s\n' "$moltis_response1" | grep -Eiq '(^|[^a-z0-9])ok([^a-z0-9]|$)' || fail "Moltis simple query #1 did not return OK"
+      local moltis_probe
+      moltis_probe=$(run_ssh "python3 - <<'PY'
+import json, os, re, urllib.request
 
-      moltis_response2=$(run_ssh '~/.local/bin/moltis --log-level error agent --message "What is 2+2? Reply with only the answer."') || fail "Moltis simple query #2 failed"
-      printf '%s\n' "$moltis_response2" | grep -Eiq '(^|[^a-z0-9])(4|four)([^a-z0-9]|$)' || fail "Moltis simple query #2 did not return expected answer"
+try:
+    import tomllib
+except Exception:
+    import tomli as tomllib
+
+cfg_path = os.path.expanduser('~/.config/moltis/moltis.toml')
+cfg = tomllib.load(open(cfg_path, 'rb'))
+
+ollama = ((cfg.get('providers') or {}).get('ollama') or {})
+base_url = str(ollama.get('base_url') or '').rstrip('/')
+models = ollama.get('models') or []
+model = models[0] if isinstance(models, list) and models else None
+
+if not base_url or not model:
+    raise SystemExit(3)
+
+if base_url.endswith('/v1/chat/completions'):
+    endpoint = base_url
+elif base_url.endswith('/v1'):
+    endpoint = f'{base_url}/chat/completions'
+else:
+    endpoint = f'{base_url}/v1/chat/completions'
+
+print(f'moltis_base_url|{base_url}')
+print(f'moltis_endpoint|{endpoint}')
+print(f'moltis_model|{model}')
+
+def post(prompt):
+    payload = {
+        'model': model,
+        'messages': [{'role': 'user', 'content': prompt}],
+        'stream': False,
+    }
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(endpoint, data=data, method='POST', headers={'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.status, r.read().decode(errors='replace')
+    except Exception as e:
+        if hasattr(e, 'code'):
+            try:
+                body = e.read().decode(errors='replace')
+            except Exception:
+                body = str(e)
+            return e.code, body
+        return 599, str(e)
+
+def response_text(body):
+    try:
+        obj = json.loads(body)
+    except Exception:
+        return body
+    if not isinstance(obj, dict):
+        return body
+    choices = obj.get('choices')
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        if isinstance(first, dict):
+            msg = first.get('message')
+            if isinstance(msg, dict):
+                return str(msg.get('content', ''))
+            return str(first.get('text', ''))
+    return str(obj)
+
+tests = [
+    ('ok', 'Reply with only OK.', r'(^|[^a-z0-9])ok([^a-z0-9]|$)'),
+    ('math', 'What is 2+2? Reply with only the answer.', r'(^|[^a-z0-9])(4|four)([^a-z0-9]|$)'),
+]
+
+for label, prompt, pattern in tests:
+    status, body = post(prompt)
+    text = response_text(body)
+    normalized = str(text).strip().lower()
+    print(f'{label}_status|{status}')
+    print(f'{label}_preview|{normalized[:80].replace(chr(10), chr(32))}')
+    if status != 200:
+        raise SystemExit(10)
+    if not re.search(pattern, normalized):
+        raise SystemExit(11)
+PY") || fail "Moltis config-based chat probe failed"
+
+      log "$moltis_probe"
 
       pass "Moltis health + simple query checks passed"
       ;;

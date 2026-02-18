@@ -21,15 +21,22 @@ sudo systemctl status hailo-ollama hailo-sanitize-proxy
 
 ## 2) Serve the facade HTML
 
-Serve from this repo root (recommended, avoids `file://` quirks):
+Installer now provisions a systemd service for the facade server:
 
 ```bash
-python3 -m http.server 8787
+sudo systemctl status unified-chat-facade
+sudo journalctl -u unified-chat-facade -f
 ```
 
 Open:
 
 `http://127.0.0.1:8787/templates/unified-chat-facade.html`
+
+Manual fallback (from repo root):
+
+```bash
+python3 -m http.server 8787
+```
 
 ## 3) Allow this origin in OpenClaw (if needed)
 
