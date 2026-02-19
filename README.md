@@ -198,7 +198,8 @@ This validates:
 - facade intermediary HTTP-chat path (`runtime profile -> facade mode -> proxy -> hailo-ollama`)
 - direct-vs-proxy compatibility matrix for Hailo endpoints
 - proxy OpenAI model discovery compatibility (`/v1/models`)
-- exhaustive flavor matrix via `RUN_ALL_FLAVORS=true` (`openclaw`, `picoclaw`, `zeroclaw`, `nanobot`, `moltis`)
+- exhaustive flavor matrix via `RUN_ALL_FLAVORS=true` (`picoclaw`, `zeroclaw`, `nanobot`, `moltis`, `openclaw`)
+- per-flavor simple-query latency capture with end-of-run comparison table (`Query #1`, `Query #2`, `Total`, in seconds)
 
 ## Troubleshooting
 

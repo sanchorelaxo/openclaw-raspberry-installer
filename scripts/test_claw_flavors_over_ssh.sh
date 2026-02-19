@@ -17,6 +17,74 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 pass() { printf 'PASS: %s\n' "$*"; }
 warn() { printf 'WARN: %s\n' "$*" >&2; }
 
+declare -a QUERY_TIMING_FLAVORS=()
+declare -A QUERY_TIMING_QUERY1_SECONDS=()
+declare -A QUERY_TIMING_QUERY2_SECONDS=()
+declare -A QUERY_TIMING_TOTAL_SECONDS=()
+
+TIMED_LAST_SECONDS=0
+
+run_timed_remote_command() {
+  local __output_var="$1"
+  shift
+
+  local started ended output status
+  started=$(date +%s)
+
+  set +e
+  output=$(run_ssh "$@")
+  status=$?
+  set -e
+
+  ended=$(date +%s)
+  TIMED_LAST_SECONDS=$((ended - started))
+
+  printf -v "$__output_var" '%s' "$output"
+  return "$status"
+}
+
+add_query_timing_flavor() {
+  local flavor="$1"
+  local existing
+  for existing in "${QUERY_TIMING_FLAVORS[@]}"; do
+    [[ "$existing" == "$flavor" ]] && return 0
+  done
+  QUERY_TIMING_FLAVORS+=("$flavor")
+}
+
+record_flavor_query_timing() {
+  local flavor="$1"
+  local query1_seconds="$2"
+  local query2_seconds="$3"
+  local total_seconds=$((query1_seconds + query2_seconds))
+
+  QUERY_TIMING_QUERY1_SECONDS["$flavor"]="$query1_seconds"
+  QUERY_TIMING_QUERY2_SECONDS["$flavor"]="$query2_seconds"
+  QUERY_TIMING_TOTAL_SECONDS["$flavor"]="$total_seconds"
+  add_query_timing_flavor "$flavor"
+}
+
+print_query_timing_table() {
+  if [[ "${#QUERY_TIMING_FLAVORS[@]}" -eq 0 ]]; then
+    warn "No flavor query timing data collected"
+    return
+  fi
+
+  log ""
+  log "=== Flavor query timing comparison (seconds) ==="
+  printf '%-10s | %9s | %9s | %9s\n' "Flavor" "Query #1" "Query #2" "Total"
+  printf '%-10s-+-%9s-+-%9s-+-%9s\n' "----------" "---------" "---------" "---------"
+
+  local flavor
+  for flavor in "${QUERY_TIMING_FLAVORS[@]}"; do
+    printf '%-10s | %9s | %9s | %9s\n' \
+      "$flavor" \
+      "${QUERY_TIMING_QUERY1_SECONDS[$flavor]:-N/A}" \
+      "${QUERY_TIMING_QUERY2_SECONDS[$flavor]:-N/A}" \
+      "${QUERY_TIMING_TOTAL_SECONDS[$flavor]:-N/A}"
+  done
+}
+
 run_ssh() {
   "${SSH_CMD[@]}" "$@"
 }
@@ -426,12 +494,18 @@ check_flavor_health_and_simple_queries() {
 
       log "OpenClaw local queries may take ~20-40s each on Hailo; waiting for completion..."
 
-      local response1 response2
-      response1=$(run_ssh 'PATH=$HOME/.npm-global/bin:$PATH; openclaw agent --local --agent main --session-id flavortest-openclaw-1 --timeout 120 --message "Reply with only OK."') || fail "OpenClaw simple query #1 failed"
+      local response1 response2 openclaw_query1_seconds openclaw_query2_seconds
+      run_timed_remote_command response1 'PATH=$HOME/.npm-global/bin:$PATH; openclaw agent --local --agent main --session-id flavortest-openclaw-1 --timeout 120 --message "Reply with only OK."' || fail "OpenClaw simple query #1 failed"
+      openclaw_query1_seconds=$TIMED_LAST_SECONDS
       printf '%s\n' "$response1" | grep -Eiq '(^|[^a-z0-9])ok([^a-z0-9]|$)' || fail "OpenClaw simple query #1 did not return OK"
+      log "OpenClaw query #1 completed in ${openclaw_query1_seconds}s"
 
-      response2=$(run_ssh 'PATH=$HOME/.npm-global/bin:$PATH; openclaw agent --local --agent main --session-id flavortest-openclaw-2 --timeout 120 --message "What is 2+2? Reply with only the answer."') || fail "OpenClaw simple query #2 failed"
+      run_timed_remote_command response2 'PATH=$HOME/.npm-global/bin:$PATH; openclaw agent --local --agent main --session-id flavortest-openclaw-2 --timeout 120 --message "What is 2+2? Reply with only the answer."' || fail "OpenClaw simple query #2 failed"
+      openclaw_query2_seconds=$TIMED_LAST_SECONDS
       printf '%s\n' "$response2" | grep -Eiq '(^|[^a-z0-9])(4|four)([^a-z0-9]|$)' || fail "OpenClaw simple query #2 did not return expected answer"
+      log "OpenClaw query #2 completed in ${openclaw_query2_seconds}s"
+
+      record_flavor_query_timing "$flavor" "$openclaw_query1_seconds" "$openclaw_query2_seconds"
 
       pass "OpenClaw health + simple query checks passed"
       ;;
@@ -443,12 +517,18 @@ check_flavor_health_and_simple_queries() {
       pico_status=$(run_ssh '~/.local/bin/picoclaw status') || fail "picoclaw status failed"
       printf '%s\n' "$pico_status" | grep -qi 'Config:' || fail "picoclaw status output missing config info"
 
-      local pico_response1 pico_response2
-      pico_response1=$(run_ssh '~/.local/bin/picoclaw agent --message "Reply with only OK."') || fail "PicoClaw simple query #1 failed"
+      local pico_response1 pico_response2 pico_query1_seconds pico_query2_seconds
+      run_timed_remote_command pico_response1 '~/.local/bin/picoclaw agent --message "Reply with only OK."' || fail "PicoClaw simple query #1 failed"
+      pico_query1_seconds=$TIMED_LAST_SECONDS
       printf '%s\n' "$pico_response1" | grep -Eiq '(^|[^a-z0-9])ok([^a-z0-9]|$)' || fail "PicoClaw simple query #1 did not return OK"
+      log "PicoClaw query #1 completed in ${pico_query1_seconds}s"
 
-      pico_response2=$(run_ssh '~/.local/bin/picoclaw agent --message "What is 2+2? Reply with only the answer."') || fail "PicoClaw simple query #2 failed"
+      run_timed_remote_command pico_response2 '~/.local/bin/picoclaw agent --message "What is 2+2? Reply with only the answer."' || fail "PicoClaw simple query #2 failed"
+      pico_query2_seconds=$TIMED_LAST_SECONDS
       printf '%s\n' "$pico_response2" | grep -Eiq '(^|[^a-z0-9])(4|four)([^a-z0-9]|$)' || fail "PicoClaw simple query #2 did not return expected answer"
+      log "PicoClaw query #2 completed in ${pico_query2_seconds}s"
+
+      record_flavor_query_timing "$flavor" "$pico_query1_seconds" "$pico_query2_seconds"
 
       pass "PicoClaw health + simple query checks passed"
       ;;
@@ -460,25 +540,33 @@ check_flavor_health_and_simple_queries() {
       zero_status=$(run_ssh '~/.local/bin/zeroclaw status') || fail "zeroclaw status failed"
       printf '%s\n' "$zero_status" | grep -Eiq '(provider|status|gateway)' || fail "zeroclaw status output missing expected sections"
 
-      local zero_response1 zero_response2 attempt
+      local zero_response1 zero_response2 attempt zero_query1_seconds zero_query2_seconds
+      zero_query1_seconds=0
+      zero_query2_seconds=0
 
       for attempt in 1 2 3; do
-        zero_response1=$(run_ssh '~/.local/bin/zeroclaw agent --provider "custom:http://127.0.0.1:8081/v1" --model qwen2:1.5b --message "What is 2+2? Reply with only the answer."') || fail "ZeroClaw simple query #1 failed"
+        run_timed_remote_command zero_response1 '~/.local/bin/zeroclaw agent --provider "custom:http://127.0.0.1:8081/v1" --model qwen2:1.5b --message "What is 2+2? Reply with only the answer."' || fail "ZeroClaw simple query #1 failed"
+        zero_query1_seconds=$((zero_query1_seconds + TIMED_LAST_SECONDS))
         if printf '%s\n' "$zero_response1" | grep -Eiq '(^|[^a-z0-9])(4|four)([^a-z0-9]|$)'; then
           break
         fi
         [[ "$attempt" -lt 3 ]] && warn "ZeroClaw simple query #1 attempt $attempt did not match expected answer; retrying..."
       done
       printf '%s\n' "$zero_response1" | grep -Eiq '(^|[^a-z0-9])(4|four)([^a-z0-9]|$)' || fail "ZeroClaw simple query #1 did not return expected answer"
+      log "ZeroClaw query #1 completed in ${zero_query1_seconds}s"
 
       for attempt in 1 2 3; do
-        zero_response2=$(run_ssh '~/.local/bin/zeroclaw agent --provider "custom:http://127.0.0.1:8081/v1" --model qwen2:1.5b --message "What is 3+3? Reply with only the answer."') || fail "ZeroClaw simple query #2 failed"
+        run_timed_remote_command zero_response2 '~/.local/bin/zeroclaw agent --provider "custom:http://127.0.0.1:8081/v1" --model qwen2:1.5b --message "What is 3+3? Reply with only the answer."' || fail "ZeroClaw simple query #2 failed"
+        zero_query2_seconds=$((zero_query2_seconds + TIMED_LAST_SECONDS))
         if printf '%s\n' "$zero_response2" | grep -Eiq '(^|[^a-z0-9])(6|six)([^a-z0-9]|$)'; then
           break
         fi
         [[ "$attempt" -lt 3 ]] && warn "ZeroClaw simple query #2 attempt $attempt did not match expected answer; retrying..."
       done
       printf '%s\n' "$zero_response2" | grep -Eiq '(^|[^a-z0-9])(6|six)([^a-z0-9]|$)' || fail "ZeroClaw simple query #2 did not return expected answer"
+      log "ZeroClaw query #2 completed in ${zero_query2_seconds}s"
+
+      record_flavor_query_timing "$flavor" "$zero_query1_seconds" "$zero_query2_seconds"
 
       pass "ZeroClaw health + simple query checks passed"
       ;;
@@ -490,12 +578,18 @@ check_flavor_health_and_simple_queries() {
       nanobot_status=$(run_ssh '~/.local/bin/nanobot status') || fail "nanobot status failed"
       printf '%s\n' "$nanobot_status" | grep -Eiq '(Config:|Model:)' || fail "nanobot status output missing expected info"
 
-      local nanobot_response1 nanobot_response2
-      nanobot_response1=$(run_ssh '~/.local/bin/nanobot agent --message "Reply with only OK."') || fail "Nanobot simple query #1 failed"
+      local nanobot_response1 nanobot_response2 nanobot_query1_seconds nanobot_query2_seconds
+      run_timed_remote_command nanobot_response1 '~/.local/bin/nanobot agent --message "Reply with only OK."' || fail "Nanobot simple query #1 failed"
+      nanobot_query1_seconds=$TIMED_LAST_SECONDS
       printf '%s\n' "$nanobot_response1" | grep -Eiq '(^|[^a-z0-9])ok([^a-z0-9]|$)' || fail "Nanobot simple query #1 did not return OK"
+      log "Nanobot query #1 completed in ${nanobot_query1_seconds}s"
 
-      nanobot_response2=$(run_ssh '~/.local/bin/nanobot agent --message "What is 2+2? Reply with only the answer."') || fail "Nanobot simple query #2 failed"
+      run_timed_remote_command nanobot_response2 '~/.local/bin/nanobot agent --message "What is 2+2? Reply with only the answer."' || fail "Nanobot simple query #2 failed"
+      nanobot_query2_seconds=$TIMED_LAST_SECONDS
       printf '%s\n' "$nanobot_response2" | grep -Eiq '(^|[^a-z0-9])(4|four)([^a-z0-9]|$)' || fail "Nanobot simple query #2 did not return expected answer"
+      log "Nanobot query #2 completed in ${nanobot_query2_seconds}s"
+
+      record_flavor_query_timing "$flavor" "$nanobot_query1_seconds" "$nanobot_query2_seconds"
 
       pass "Nanobot health + simple query checks passed"
       ;;
@@ -509,7 +603,7 @@ check_flavor_health_and_simple_queries() {
 
       local moltis_probe
       moltis_probe=$(run_ssh "python3 - <<'PY'
-import json, os, re, urllib.request
+import json, os, re, time, urllib.request
 
 try:
     import tomllib
@@ -581,9 +675,12 @@ tests = [
 ]
 
 for label, prompt, pattern in tests:
+    started = time.monotonic()
     status, body = post(prompt)
+    elapsed_seconds = int(time.monotonic() - started)
     text = response_text(body)
     normalized = str(text).strip().lower()
+    print(f'{label}_elapsed_seconds|{elapsed_seconds}')
     print(f'{label}_status|{status}')
     print(f'{label}_preview|{normalized[:80].replace(chr(10), chr(32))}')
     if status != 200:
@@ -593,6 +690,16 @@ for label, prompt, pattern in tests:
 PY") || fail "Moltis config-based chat probe failed"
 
       log "$moltis_probe"
+
+      local moltis_query1_seconds moltis_query2_seconds
+      moltis_query1_seconds=$(printf '%s\n' "$moltis_probe" | awk -F'|' '/^ok_elapsed_seconds\|/{print $2}' | tr -d '[:space:]')
+      moltis_query2_seconds=$(printf '%s\n' "$moltis_probe" | awk -F'|' '/^math_elapsed_seconds\|/{print $2}' | tr -d '[:space:]')
+      [[ "$moltis_query1_seconds" =~ ^[0-9]+$ ]] || fail "Moltis query #1 timing missing from probe output"
+      [[ "$moltis_query2_seconds" =~ ^[0-9]+$ ]] || fail "Moltis query #2 timing missing from probe output"
+      log "Moltis query #1 completed in ${moltis_query1_seconds}s"
+      log "Moltis query #2 completed in ${moltis_query2_seconds}s"
+
+      record_flavor_query_timing "$flavor" "$moltis_query1_seconds" "$moltis_query2_seconds"
 
       pass "Moltis health + simple query checks passed"
       ;;
@@ -607,7 +714,7 @@ main() {
 
   if [[ "$RUN_ALL_FLAVORS" == "true" ]]; then
     local flavor
-    for flavor in openclaw picoclaw zeroclaw nanobot moltis; do
+    for flavor in picoclaw zeroclaw nanobot moltis openclaw; do
       log "==== Testing flavor: $flavor ===="
       write_runtime_profile_for_flavor "$flavor"
       run_checks_for_current_profile_flavor
@@ -615,6 +722,8 @@ main() {
   else
     run_checks_for_current_profile_flavor
   fi
+
+  print_query_timing_table
 
   pass "All cross-flavor checks passed"
 }
