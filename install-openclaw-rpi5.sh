@@ -103,7 +103,7 @@ normalize_claw_flavor() {
     local raw="${1:-openclaw}"
     raw=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')
     case "$raw" in
-        openclaw|picoclaw|zeroclaw|nanobot|moltis)
+        openclaw|picoclaw|zeroclaw|nanobot|moltis|ironclaw)
             printf '%s' "$raw"
             ;;
         *)
@@ -121,6 +121,7 @@ prompt_claw_flavor() {
     echo "  3) ZeroClaw (Rust)"
     echo "  4) Nanobot (Python)"
     echo "  5) Moltis (Rust)"
+    echo "  6) IronClaw (Rust)"
     echo ""
     local default_choice="1"
     case "$CLAW_FLAVOR" in
@@ -128,6 +129,7 @@ prompt_claw_flavor() {
         zeroclaw) default_choice="3" ;;
         nanobot) default_choice="4" ;;
         moltis) default_choice="5" ;;
+        ironclaw) default_choice="6" ;;
     esac
 
     local choice
@@ -137,6 +139,7 @@ prompt_claw_flavor() {
         3) CLAW_FLAVOR="zeroclaw" ;;
         4) CLAW_FLAVOR="nanobot" ;;
         5) CLAW_FLAVOR="moltis" ;;
+        6) CLAW_FLAVOR="ironclaw" ;;
         *) CLAW_FLAVOR="openclaw" ;;
     esac
     print_step "Selected assistant flavor: $CLAW_FLAVOR"
@@ -214,6 +217,21 @@ EOF
     "id": "moltis-local",
     "title": "Moltis Local",
     "subtitle": "Moltis + local Hailo model",
+    "kind": "http-chat",
+    "endpoint": "$ollama_chat_url",
+    "model": "$HAILO_MODEL"
+  }
+]
+EOF
+)
+    elif [[ "$CLAW_FLAVOR" == "ironclaw" ]]; then
+        active_mode="ironclaw-local"
+        extra_mode_json=$(cat <<EOF
+[
+  {
+    "id": "ironclaw-local",
+    "title": "IronClaw Local",
+    "subtitle": "IronClaw + local Hailo model",
     "kind": "http-chat",
     "endpoint": "$ollama_chat_url",
     "model": "$HAILO_MODEL"
@@ -1459,6 +1477,56 @@ EOF
     write_unified_facade_runtime_profile
 }
 
+phase3_ironclaw_install() {
+    print_header "Phase 3: IronClaw Installation"
+
+    local model_base_url
+    model_base_url="$(get_hailo_openai_base_url)"
+
+    if ! command -v cargo &> /dev/null; then
+        print_step "Installing Rust toolchain for IronClaw build..."
+        sudo apt update
+        sudo apt install -y cargo rustc git
+    fi
+
+    print_step "Installing IronClaw via cargo (this may take several minutes)..."
+    if ! cargo install --locked --git https://github.com/nearai/ironclaw.git ironclaw; then
+        print_warn "IronClaw install failed with system Rust/cargo. Trying rustup stable toolchain..."
+
+        if ! command -v rustup &> /dev/null; then
+            print_step "Installing rustup (stable toolchain manager)..."
+            RUSTUP_INIT_SKIP_PATH_CHECK=yes curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
+        fi
+
+        # shellcheck disable=SC1090
+        source "$HOME/.cargo/env"
+        rustup toolchain install stable --profile minimal
+        rustup default stable
+
+        cargo install --locked --git https://github.com/nearai/ironclaw.git ironclaw
+    fi
+
+    mkdir -p "$HOME/.local/bin"
+    if [[ -x "$HOME/.cargo/bin/ironclaw" ]]; then
+        install -m 0755 "$HOME/.cargo/bin/ironclaw" "$HOME/.local/bin/ironclaw"
+    else
+        print_error "IronClaw binary not found at ~/.cargo/bin/ironclaw after install"
+        return 1
+    fi
+
+    mkdir -p "$HOME/.ironclaw"
+    cat > "$HOME/.ironclaw/.env" << EOF
+DATABASE_URL=postgresql://localhost/ironclaw
+OPENAI_BASE_URL=$model_base_url
+OPENAI_API_KEY=hailo-local
+OPENAI_MODEL=$HAILO_MODEL
+LLM_BACKEND=openai_compatible
+EOF
+
+    print_step "IronClaw installed and local Hailo defaults written to ~/.ironclaw/.env (endpoint=$model_base_url)"
+    write_unified_facade_runtime_profile
+}
+
 phase3_install_selected_claw() {
     CLAW_FLAVOR=$(normalize_claw_flavor "$CLAW_FLAVOR")
     case "$CLAW_FLAVOR" in
@@ -1473,6 +1541,9 @@ phase3_install_selected_claw() {
             ;;
         moltis)
             phase3_moltis_install
+            ;;
+        ironclaw)
+            phase3_ironclaw_install
             ;;
         *)
             phase3_openclaw_install
@@ -1938,6 +2009,13 @@ phase9_verify_selected_claw() {
             fi
             print_step "Moltis binary verification complete"
             ;;
+        ironclaw)
+            print_header "Phase 9: Verification (IronClaw)"
+            if command -v "$HOME/.local/bin/ironclaw" >/dev/null 2>&1; then
+                "$HOME/.local/bin/ironclaw" --help >/dev/null 2>&1 || true
+            fi
+            print_step "IronClaw binary verification complete"
+            ;;
     esac
 }
 
@@ -1963,7 +2041,7 @@ main() {
     echo "  - Node.js 22+ (via n version manager)"
     echo "  - Docker (Trixie-specific)"
     echo "  - Hailo GenAI stack with qwen2:1.5b"
-    echo "  - Selected claw flavor (OpenClaw/PicoClaw/ZeroClaw/Nanobot/Moltis) with local Hailo model wiring"
+    echo "  - Selected claw flavor (OpenClaw/PicoClaw/ZeroClaw/Nanobot/Moltis/IronClaw) with local Hailo model wiring"
     echo "  - molt_tools skill for Moltbook integration"
     echo "  - First boot task: post to Moltbook"
     echo ""
@@ -2026,6 +2104,10 @@ main() {
         echo "To start Nanobot:"
         echo "  ~/.local/bin/nanobot gateway"
         echo "  ~/.local/bin/nanobot agent"
+    elif [[ "$CLAW_FLAVOR" == "ironclaw" ]]; then
+        echo "To start IronClaw:"
+        echo "  ~/.local/bin/ironclaw"
+        echo "  ~/.local/bin/ironclaw onboard"
     else
         echo "To start Moltis:"
         echo "  ~/.local/bin/moltis"

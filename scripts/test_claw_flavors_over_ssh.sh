@@ -211,6 +211,28 @@ EOF"
 }
 EOF"
       ;;
+    ironclaw)
+      run_ssh "cat > '$runtime_path' <<'EOF'
+{
+  \"schemaVersion\": 1,
+  \"flavor\": \"ironclaw\",
+  \"gatewayUrl\": \"ws://127.0.0.1:18789\",
+  \"ollamaUrl\": \"http://127.0.0.1:8081/v1/chat/completions\",
+  \"ollamaModel\": \"$TEST_HAILO_MODEL\",
+  \"activeMode\": \"ironclaw-local\",
+  \"extraModes\": [
+    {
+      \"id\": \"ironclaw-local\",
+      \"title\": \"IronClaw Local\",
+      \"subtitle\": \"IronClaw + local Hailo model\",
+      \"kind\": \"http-chat\",
+      \"endpoint\": \"http://127.0.0.1:8081/v1/chat/completions\",
+      \"model\": \"$TEST_HAILO_MODEL\"
+    }
+  ]
+}
+EOF"
+      ;;
     *)
       fail "Unsupported flavor for runtime profile write: $flavor"
       ;;
@@ -235,7 +257,7 @@ check_profile_shape() {
 
   local flavor
   flavor=$(printf '%s\n' "$profile_summary" | awk -F= '/^flavor=/{print $2}')
-  [[ "$flavor" =~ ^(openclaw|picoclaw|zeroclaw|nanobot|moltis)$ ]] || fail "Invalid flavor in runtime profile: $flavor"
+  [[ "$flavor" =~ ^(openclaw|picoclaw|zeroclaw|nanobot|moltis|ironclaw)$ ]] || fail "Invalid flavor in runtime profile: $flavor"
 
   local url
   url=$(printf '%s\n' "$profile_summary" | awk -F= '/^ollamaUrl=/{print $2}')
@@ -472,6 +494,13 @@ check_flavor_binary_and_mode_alignment() {
       [[ "$extra_count" -ge 1 ]] || fail "Moltis profile missing conditional extra modes"
       pass "Moltis flavor aligned with runtime profile and binary"
       ;;
+    ironclaw)
+      run_ssh "test -x ~/.local/bin/ironclaw || command -v ironclaw >/dev/null 2>&1" || fail "IronClaw binary missing"
+      local extra_count
+      extra_count=$(json_read_remote "$RUNTIME_PROFILE_REL" 'print(len(obj.get("extraModes") or []))' | tr -d '[:space:]')
+      [[ "$extra_count" -ge 1 ]] || fail "IronClaw profile missing conditional extra modes"
+      pass "IronClaw flavor aligned with runtime profile and binary"
+      ;;
     *)
       fail "Unknown flavor from profile: $flavor"
       ;;
@@ -703,6 +732,68 @@ PY") || fail "Moltis config-based chat probe failed"
 
       pass "Moltis health + simple query checks passed"
       ;;
+    ironclaw)
+      log "== IronClaw health + simple query checks =="
+      run_ssh 'test -x ~/.local/bin/ironclaw || command -v ironclaw >/dev/null 2>&1' || fail "IronClaw binary missing for health checks"
+
+      local ironclaw_help
+      ironclaw_help=$(run_ssh '~/.local/bin/ironclaw --help 2>&1') || fail "ironclaw --help failed"
+      printf '%s\n' "$ironclaw_help" | grep -Eiq '(onboard|help|agent|gateway)' || fail "ironclaw help output missing expected commands"
+
+      local ironclaw_probe
+      ironclaw_probe=$(run_ssh "python3 - <<'PY'
+import json, re, time, urllib.request
+
+endpoint='http://127.0.0.1:8081/v1/chat/completions'
+model='$TEST_HAILO_MODEL'
+
+def post(prompt):
+    payload={
+        'model': model,
+        'messages': [{'role': 'user', 'content': prompt}],
+        'stream': False,
+    }
+    req=urllib.request.Request(endpoint, data=json.dumps(payload).encode(), method='POST', headers={'Content-Type':'application/json'})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return r.status, r.read().decode(errors='replace')
+
+def extract_text(body):
+    try:
+        obj=json.loads(body)
+        return str(((obj.get('choices') or [{}])[0].get('message') or {}).get('content',''))
+    except Exception:
+        return body
+
+checks=[
+    ('ok', 'Reply with only OK.', r'(^|[^a-z0-9])ok([^a-z0-9]|$)'),
+    ('math', 'What is 2+2? Reply with only the answer.', r'(^|[^a-z0-9])(4|four)([^a-z0-9]|$)'),
+]
+
+for label,prompt,pattern in checks:
+    started=time.monotonic()
+    status,body=post(prompt)
+    elapsed=int(time.monotonic()-started)
+    text=extract_text(body).strip().lower()
+    print(f'{label}_elapsed_seconds|{elapsed}')
+    print(f'{label}_status|{status}')
+    print(f'{label}_preview|{text[:80]}')
+    if status != 200:
+        raise SystemExit(10)
+    if not re.search(pattern, text):
+        raise SystemExit(11)
+PY") || fail "IronClaw local-Hailo probe failed"
+
+      log "$ironclaw_probe"
+
+      local ironclaw_query1_seconds ironclaw_query2_seconds
+      ironclaw_query1_seconds=$(printf '%s\n' "$ironclaw_probe" | awk -F'|' '/^ok_elapsed_seconds\|/{print $2}' | tr -d '[:space:]')
+      ironclaw_query2_seconds=$(printf '%s\n' "$ironclaw_probe" | awk -F'|' '/^math_elapsed_seconds\|/{print $2}' | tr -d '[:space:]')
+      [[ "$ironclaw_query1_seconds" =~ ^[0-9]+$ ]] || fail "IronClaw query #1 timing missing from probe output"
+      [[ "$ironclaw_query2_seconds" =~ ^[0-9]+$ ]] || fail "IronClaw query #2 timing missing from probe output"
+      record_flavor_query_timing "$flavor" "$ironclaw_query1_seconds" "$ironclaw_query2_seconds"
+
+      pass "IronClaw health + simple query checks passed"
+      ;;
     *)
       fail "Unknown flavor from profile: $flavor"
       ;;
@@ -714,7 +805,7 @@ main() {
 
   if [[ "$RUN_ALL_FLAVORS" == "true" ]]; then
     local flavor
-    for flavor in picoclaw zeroclaw nanobot moltis openclaw; do
+    for flavor in picoclaw zeroclaw nanobot moltis ironclaw openclaw; do
       log "==== Testing flavor: $flavor ===="
       write_runtime_profile_for_flavor "$flavor"
       run_checks_for_current_profile_flavor

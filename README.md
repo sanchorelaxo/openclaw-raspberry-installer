@@ -38,6 +38,7 @@ For the main entrypoint see [`install-openclaw-rpi5.sh`](./install-openclaw-rpi5
 - **`zeroclaw`**: full ZeroClaw install/build + local Hailo model wiring.
 - **`nanobot`**: Nanobot install + local Hailo OpenAI-compatible wiring.
 - **`moltis`**: Moltis install + local Hailo OpenAI-compatible wiring.
+- **`ironclaw`**: IronClaw install/build + local Hailo OpenAI-compatible wiring.
 
 Set via environment:
 
@@ -47,9 +48,12 @@ CLAW_FLAVOR=picoclaw ./install-openclaw-rpi5.sh
 CLAW_FLAVOR=zeroclaw ./install-openclaw-rpi5.sh
 CLAW_FLAVOR=nanobot ./install-openclaw-rpi5.sh
 CLAW_FLAVOR=moltis ./install-openclaw-rpi5.sh
+CLAW_FLAVOR=ironclaw ./install-openclaw-rpi5.sh
 ```
 
 If omitted, installer prompts interactively.
+
+All flavors can be validated through the same local Hailo endpoint path used by the unified facade and SSH flavor test harness.
 
 ## Target hardware and prerequisites
 
@@ -198,7 +202,7 @@ This validates:
 - facade intermediary HTTP-chat path (`runtime profile -> facade mode -> proxy -> hailo-ollama`)
 - direct-vs-proxy compatibility matrix for Hailo endpoints
 - proxy OpenAI model discovery compatibility (`/v1/models`)
-- exhaustive flavor matrix via `RUN_ALL_FLAVORS=true` (`picoclaw`, `zeroclaw`, `nanobot`, `moltis`, `openclaw`)
+- exhaustive flavor matrix via `RUN_ALL_FLAVORS=true` (`picoclaw`, `zeroclaw`, `nanobot`, `moltis`, `ironclaw`, `openclaw`)
 - per-flavor simple-query latency capture with end-of-run comparison table (`Query #1`, `Query #2`, `Total`, in seconds)
 
 ## Troubleshooting
