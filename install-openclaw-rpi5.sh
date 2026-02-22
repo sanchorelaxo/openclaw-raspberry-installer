@@ -2107,7 +2107,6 @@ main() {
     elif [[ "$CLAW_FLAVOR" == "ironclaw" ]]; then
         echo "To start IronClaw:"
         echo "  ~/.local/bin/ironclaw"
-        echo "  ~/.local/bin/ironclaw onboard"
     else
         echo "To start Moltis:"
         echo "  ~/.local/bin/moltis"

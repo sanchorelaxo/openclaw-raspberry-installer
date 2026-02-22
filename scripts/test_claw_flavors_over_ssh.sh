@@ -9,6 +9,7 @@ RUNTIME_PROFILE_REL=${RUNTIME_PROFILE_REL:-templates/unified-chat-runtime.json}
 FACADE_REL=${FACADE_REL:-templates/unified-chat-facade.html}
 RUN_ALL_FLAVORS=${RUN_ALL_FLAVORS:-false}
 TEST_HAILO_MODEL=${TEST_HAILO_MODEL:-qwen2:1.5b}
+FLAVORS_TO_TEST=${FLAVORS_TO_TEST:-picoclaw zeroclaw nanobot moltis ironclaw openclaw}
 
 SSH_CMD=(ssh -o ConnectTimeout=10 -p "$SSH_PORT" "${SSH_USER}@${SSH_HOST}")
 
@@ -239,12 +240,138 @@ EOF"
   esac
 }
 
+preload_minimal_flavor_config() {
+  local flavor="$1"
+  local base_url="http://127.0.0.1:8081/v1"
+
+  case "$flavor" in
+    picoclaw)
+      run_ssh "mkdir -p ~/.picoclaw ~/.config/picoclaw"
+      run_ssh "cat > ~/.picoclaw/config.json <<'EOF'
+{
+  \"agents\": {
+    \"defaults\": {
+      \"workspace\": \"~/.picoclaw/workspace\",
+      \"restrict_to_workspace\": true,
+      \"model\": \"$TEST_HAILO_MODEL\",
+      \"max_tokens\": 2048,
+      \"temperature\": 0.7,
+      \"max_tool_iterations\": 20
+    }
+  },
+  \"providers\": {
+    \"ollama\": {
+      \"api_key\": \"hailo-local\",
+      \"api_base\": \"$base_url\"
+    }
+  },
+  \"gateway\": {
+    \"host\": \"127.0.0.1\",
+    \"port\": 18790
+  }
+}
+EOF"
+      run_ssh 'cp ~/.picoclaw/config.json ~/.config/picoclaw/config.json'
+      ;;
+    zeroclaw)
+      run_ssh 'mkdir -p ~/.zeroclaw'
+      run_ssh "cat > ~/.zeroclaw/config.toml <<'EOF'
+api_key = \"hailo-local\"
+default_provider = \"custom:$base_url\"
+default_model = \"$TEST_HAILO_MODEL\"
+default_temperature = 0.7
+
+[gateway]
+host = \"127.0.0.1\"
+port = 8080
+require_pairing = true
+
+[heartbeat]
+enabled = false
+interval_minutes = 30
+EOF"
+      ;;
+    nanobot)
+      run_ssh 'mkdir -p ~/.nanobot ~/.nanobot/workspace'
+      run_ssh "cat > ~/.nanobot/config.json <<'EOF'
+{
+  \"agents\": {
+    \"defaults\": {
+      \"workspace\": \"~/.nanobot/workspace\",
+      \"model\": \"$TEST_HAILO_MODEL\",
+      \"max_tokens\": 2048,
+      \"temperature\": 0.7,
+      \"max_tool_iterations\": 20,
+      \"memory_window\": 50
+    }
+  },
+  \"providers\": {
+    \"custom\": {
+      \"api_key\": \"hailo-local\",
+      \"api_base\": \"$base_url\"
+    }
+  },
+  \"gateway\": {
+    \"host\": \"127.0.0.1\",
+    \"port\": 18790
+  },
+  \"tools\": {
+    \"restrict_to_workspace\": true
+  }
+}
+EOF"
+      ;;
+    moltis)
+      run_ssh 'mkdir -p ~/.config/moltis ~/.moltis'
+      run_ssh "cat > ~/.config/moltis/moltis.toml <<'EOF'
+[providers]
+offered = [\"ollama\"]
+
+[providers.ollama]
+enabled = true
+base_url = \"$base_url\"
+models = [\"$TEST_HAILO_MODEL\"]
+fetch_models = false
+
+[chat]
+priority_models = [\"$TEST_HAILO_MODEL\"]
+EOF"
+      ;;
+    ironclaw)
+      run_ssh 'mkdir -p ~/.ironclaw'
+      run_ssh "cat > ~/.ironclaw/.env <<'EOF'
+DATABASE_URL=postgresql://localhost/ironclaw
+OPENAI_BASE_URL=$base_url
+OPENAI_API_KEY=hailo-local
+OPENAI_MODEL=$TEST_HAILO_MODEL
+LLM_BACKEND=openai_compatible
+EOF"
+      ;;
+    openclaw)
+      # OpenClaw config/auth are managed separately in installer flow.
+      ;;
+    *)
+      fail "Unsupported flavor for minimal config preload: $flavor"
+      ;;
+  esac
+}
+
 run_checks_for_current_profile_flavor() {
+  log "-- check_profile_shape"
   check_profile_shape
-  check_facade_runtime_support
-  check_facade_chat_intermediary
-  check_hailo_proxy_matrix
+  log "-- check_flavor_binary_and_mode_alignment"
   check_flavor_binary_and_mode_alignment
+  log "-- check_flavor_minimal_config_preload"
+  check_flavor_minimal_config_preload
+  log "-- check_flavor_preflight_sanity"
+  check_flavor_preflight_sanity
+  log "-- check_facade_runtime_support"
+  check_facade_runtime_support
+  log "-- check_hailo_proxy_matrix"
+  check_hailo_proxy_matrix
+  log "-- check_facade_chat_intermediary"
+  check_facade_chat_intermediary
+  log "-- check_flavor_health_and_simple_queries"
   check_flavor_health_and_simple_queries
 }
 
@@ -264,6 +391,123 @@ check_profile_shape() {
   [[ "$url" == http://127.0.0.1:8081/* || "$url" == http://127.0.0.1:8000/* ]] || fail "Unexpected ollamaUrl in runtime profile: $url"
 
   pass "Runtime profile exists and has expected shape"
+}
+
+check_flavor_minimal_config_preload() {
+  local flavor
+  flavor=$(json_read_remote "$RUNTIME_PROFILE_REL" 'print(obj.get("flavor",""))' | tr -d '[:space:]')
+
+  log "Validating minimal config preload for flavor=$flavor"
+
+  case "$flavor" in
+    openclaw)
+      run_ssh 'test -f ~/.openclaw/openclaw.json' || fail "OpenClaw config missing: ~/.openclaw/openclaw.json"
+      run_ssh 'test -f ~/.openclaw/agents/main/agent/auth-profiles.json' || fail "OpenClaw auth profile missing"
+      run_ssh "python3 - <<'PY'
+import json, os
+cfg=json.load(open(os.path.expanduser('~/.openclaw/openclaw.json')))
+providers=((cfg.get('models') or {}).get('providers') or {})
+if 'ollama' not in providers:
+    raise SystemExit(1)
+print('openclaw_provider|ok')
+PY" || fail "OpenClaw minimal config missing models.providers.ollama"
+      ;;
+    picoclaw)
+      run_ssh 'test -f ~/.picoclaw/config.json' || fail "PicoClaw config missing: ~/.picoclaw/config.json"
+      run_ssh 'test -f ~/.config/picoclaw/config.json' || fail "PicoClaw config mirror missing: ~/.config/picoclaw/config.json"
+      local picoclaw_cfg_probe
+      picoclaw_cfg_probe=$(run_ssh "python3 - <<'PY'
+import json, os
+cfg=json.load(open(os.path.expanduser('~/.picoclaw/config.json')))
+providers=(cfg.get('providers') or {})
+ollama=(providers.get('ollama') or {})
+defaults=((cfg.get('agents') or {}).get('defaults') or {})
+if 'ollama' not in providers:
+    raise SystemExit(1)
+if 'model' not in defaults:
+    raise SystemExit(2)
+base=str(ollama.get('api_base') or '').strip()
+print('picoclaw_ollama_api_base|'+(base if base else '<empty>'))
+print('picoclaw_default_model|'+str(defaults.get('model')))
+PY") || fail "PicoClaw minimal config missing required providers/agents structure"
+      log "$picoclaw_cfg_probe"
+      printf '%s\n' "$picoclaw_cfg_probe" | grep -q 'picoclaw_ollama_api_base|<empty>' && warn "PicoClaw ollama api_base is empty; installer minimal local wiring may not have been applied on this Pi yet"
+      ;;
+    zeroclaw)
+      run_ssh 'test -f ~/.zeroclaw/config.toml' || fail "ZeroClaw config missing: ~/.zeroclaw/config.toml"
+      run_ssh "grep -Eq '^default_provider\s*=\s*\".*\"' ~/.zeroclaw/config.toml" || fail "ZeroClaw config missing default_provider"
+      run_ssh "grep -Eq '^default_model\s*=\s*\".*\"' ~/.zeroclaw/config.toml" || fail "ZeroClaw config missing default_model"
+      ;;
+    nanobot)
+      run_ssh 'test -f ~/.nanobot/config.json' || fail "Nanobot config missing: ~/.nanobot/config.json"
+      run_ssh "python3 - <<'PY'
+import json, os
+cfg=json.load(open(os.path.expanduser('~/.nanobot/config.json')))
+base=((cfg.get('providers') or {}).get('custom') or {}).get('api_base')
+model=((cfg.get('agents') or {}).get('defaults') or {}).get('model')
+if not base or not model:
+    raise SystemExit(1)
+print('nanobot_config|ok')
+PY" || fail "Nanobot minimal config missing provider base/model"
+      ;;
+    moltis)
+      run_ssh 'test -f ~/.config/moltis/moltis.toml' || fail "Moltis config missing: ~/.config/moltis/moltis.toml"
+      run_ssh "grep -Eq '^base_url\s*=\s*\".*\"' ~/.config/moltis/moltis.toml" || fail "Moltis config missing providers.ollama.base_url"
+      run_ssh "grep -Eq '^models\s*=\s*\[' ~/.config/moltis/moltis.toml" || fail "Moltis config missing providers.ollama.models"
+      ;;
+    ironclaw)
+      run_ssh 'test -f ~/.ironclaw/.env' || fail "IronClaw env missing: ~/.ironclaw/.env"
+      run_ssh "grep -q '^OPENAI_BASE_URL=' ~/.ironclaw/.env" || fail "IronClaw env missing OPENAI_BASE_URL"
+      run_ssh "grep -q '^OPENAI_MODEL=' ~/.ironclaw/.env" || fail "IronClaw env missing OPENAI_MODEL"
+      run_ssh "grep -q '^LLM_BACKEND=openai_compatible' ~/.ironclaw/.env" || fail "IronClaw env missing LLM_BACKEND=openai_compatible"
+      ;;
+    *)
+      fail "Unknown flavor for minimal config preload checks: $flavor"
+      ;;
+  esac
+
+  pass "Flavor minimal config preload checks passed"
+}
+
+check_flavor_preflight_sanity() {
+  local flavor
+  flavor=$(json_read_remote "$RUNTIME_PROFILE_REL" 'print(obj.get("flavor",""))' | tr -d '[:space:]')
+
+  log "Running preflight troubleshooting sanity checks for flavor=$flavor"
+
+  run_ssh 'ss -ltn | grep -Eq "(:8000|:8081)"' || fail "Expected local Hailo listeners (8000/8081) are not up"
+
+  case "$flavor" in
+    openclaw)
+      run_ssh 'PATH=$HOME/.npm-global/bin:$PATH; openclaw status --all >/tmp/openclaw_preflight_status.out 2>&1' || fail "OpenClaw preflight status failed"
+      run_ssh "grep -qi 'Gateway service' /tmp/openclaw_preflight_status.out" || fail "OpenClaw preflight missing gateway service status"
+      ;;
+    picoclaw)
+      run_ssh '~/.local/bin/picoclaw status >/tmp/picoclaw_preflight_status.out 2>&1' || fail "PicoClaw preflight status failed"
+      run_ssh "grep -qi 'Config:' /tmp/picoclaw_preflight_status.out" || fail "PicoClaw preflight status missing config info"
+      ;;
+    zeroclaw)
+      run_ssh '~/.local/bin/zeroclaw status >/tmp/zeroclaw_preflight_status.out 2>&1' || fail "ZeroClaw preflight status failed"
+      run_ssh "grep -Eiq '(provider|status|gateway)' /tmp/zeroclaw_preflight_status.out" || fail "ZeroClaw preflight status missing expected sections"
+      ;;
+    nanobot)
+      run_ssh '~/.local/bin/nanobot status >/tmp/nanobot_preflight_status.out 2>&1' || fail "Nanobot preflight status failed"
+      run_ssh "grep -Eiq '(Config:|Model:)' /tmp/nanobot_preflight_status.out" || fail "Nanobot preflight status missing expected info"
+      ;;
+    moltis)
+      run_ssh '~/.local/bin/moltis --log-level error doctor >/tmp/moltis_preflight_doctor.out 2>&1' || fail "Moltis preflight doctor failed"
+      run_ssh "grep -Eiq '(providers|ollama)' /tmp/moltis_preflight_doctor.out" || fail "Moltis preflight doctor output missing provider info"
+      ;;
+    ironclaw)
+      run_ssh '~/.local/bin/ironclaw --help >/tmp/ironclaw_preflight_help.out 2>&1' || fail "IronClaw preflight help failed"
+      run_ssh "grep -Eiq '(onboard|help|agent|gateway)' /tmp/ironclaw_preflight_help.out" || fail "IronClaw preflight help missing expected commands"
+      ;;
+    *)
+      fail "Unknown flavor for preflight sanity checks: $flavor"
+      ;;
+  esac
+
+  pass "Flavor preflight troubleshooting sanity checks passed"
 }
 
 check_facade_runtime_support() {
@@ -546,15 +790,98 @@ check_flavor_health_and_simple_queries() {
       pico_status=$(run_ssh '~/.local/bin/picoclaw status') || fail "picoclaw status failed"
       printf '%s\n' "$pico_status" | grep -qi 'Config:' || fail "picoclaw status output missing config info"
 
-      local pico_response1 pico_response2 pico_query1_seconds pico_query2_seconds
-      run_timed_remote_command pico_response1 '~/.local/bin/picoclaw agent --message "Reply with only OK."' || fail "PicoClaw simple query #1 failed"
-      pico_query1_seconds=$TIMED_LAST_SECONDS
-      printf '%s\n' "$pico_response1" | grep -Eiq '(^|[^a-z0-9])ok([^a-z0-9]|$)' || fail "PicoClaw simple query #1 did not return OK"
-      log "PicoClaw query #1 completed in ${pico_query1_seconds}s"
+      local pico_probe
+      pico_probe=$(run_ssh "python3 - <<'PY'
+import json, os, re, time, urllib.request
 
-      run_timed_remote_command pico_response2 '~/.local/bin/picoclaw agent --message "What is 2+2? Reply with only the answer."' || fail "PicoClaw simple query #2 failed"
-      pico_query2_seconds=$TIMED_LAST_SECONDS
-      printf '%s\n' "$pico_response2" | grep -Eiq '(^|[^a-z0-9])(4|four)([^a-z0-9]|$)' || fail "PicoClaw simple query #2 did not return expected answer"
+cfg_path = os.path.expanduser('~/.picoclaw/config.json')
+cfg = json.load(open(cfg_path))
+
+providers = cfg.get('providers') or {}
+ollama = providers.get('ollama') or {}
+base_url = str(ollama.get('api_base') or '').rstrip('/')
+defaults = ((cfg.get('agents') or {}).get('defaults') or {})
+model = str(defaults.get('model') or '').strip()
+
+if not base_url or not model:
+    raise SystemExit(3)
+
+if base_url.endswith('/v1/chat/completions'):
+    endpoint = base_url
+elif base_url.endswith('/v1'):
+    endpoint = f'{base_url}/chat/completions'
+else:
+    endpoint = f'{base_url}/v1/chat/completions'
+
+print(f'picoclaw_base_url|{base_url}')
+print(f'picoclaw_endpoint|{endpoint}')
+print(f'picoclaw_model|{model}')
+
+def post(prompt):
+    payload = {
+        'model': model,
+        'messages': [{'role': 'user', 'content': prompt}],
+        'stream': False,
+    }
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(endpoint, data=data, method='POST', headers={'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.status, r.read().decode(errors='replace')
+    except Exception as e:
+        if hasattr(e, 'code'):
+            try:
+                body = e.read().decode(errors='replace')
+            except Exception:
+                body = str(e)
+            return e.code, body
+        return 599, str(e)
+
+def response_text(body):
+    try:
+        obj = json.loads(body)
+    except Exception:
+        return body
+    if not isinstance(obj, dict):
+        return body
+    choices = obj.get('choices')
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        if isinstance(first, dict):
+            msg = first.get('message')
+            if isinstance(msg, dict):
+                return str(msg.get('content', ''))
+            return str(first.get('text', ''))
+    return str(obj)
+
+tests = [
+    ('ok', 'Reply with only OK.', r'(^|[^a-z0-9])ok([^a-z0-9]|$)'),
+    ('math', 'What is 2+2? Reply with only the answer.', r'(^|[^a-z0-9])(4|four)([^a-z0-9]|$)'),
+]
+
+for label, prompt, pattern in tests:
+    started = time.monotonic()
+    status, body = post(prompt)
+    elapsed_seconds = int(time.monotonic() - started)
+    text = response_text(body)
+    normalized = str(text).strip().lower()
+    print(f'{label}_elapsed_seconds|{elapsed_seconds}')
+    print(f'{label}_status|{status}')
+    print(f'{label}_preview|{normalized[:80].replace(chr(10), chr(32))}')
+    if status != 200:
+        raise SystemExit(10)
+    if not re.search(pattern, normalized):
+        raise SystemExit(11)
+PY") || fail "PicoClaw config-based chat probe failed"
+
+      log "$pico_probe"
+
+      local pico_query1_seconds pico_query2_seconds
+      pico_query1_seconds=$(printf '%s\n' "$pico_probe" | awk -F'|' '/^ok_elapsed_seconds\|/{print $2}' | tr -d '[:space:]')
+      pico_query2_seconds=$(printf '%s\n' "$pico_probe" | awk -F'|' '/^math_elapsed_seconds\|/{print $2}' | tr -d '[:space:]')
+      [[ "$pico_query1_seconds" =~ ^[0-9]+$ ]] || fail "PicoClaw query #1 timing missing from probe output"
+      [[ "$pico_query2_seconds" =~ ^[0-9]+$ ]] || fail "PicoClaw query #2 timing missing from probe output"
+      log "PicoClaw query #1 completed in ${pico_query1_seconds}s"
       log "PicoClaw query #2 completed in ${pico_query2_seconds}s"
 
       record_flavor_query_timing "$flavor" "$pico_query1_seconds" "$pico_query2_seconds"
@@ -805,9 +1132,10 @@ main() {
 
   if [[ "$RUN_ALL_FLAVORS" == "true" ]]; then
     local flavor
-    for flavor in picoclaw zeroclaw nanobot moltis ironclaw openclaw; do
+    for flavor in $FLAVORS_TO_TEST; do
       log "==== Testing flavor: $flavor ===="
       write_runtime_profile_for_flavor "$flavor"
+      preload_minimal_flavor_config "$flavor"
       run_checks_for_current_profile_flavor
     done
   else

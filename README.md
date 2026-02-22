@@ -193,6 +193,9 @@ SSH_HOST=raspberrypi SSH_USER=sanchobot scripts/test_claw_flavors_over_ssh.sh
 
 # Force matrix run for all flavors by rewriting runtime profile per flavor
 RUN_ALL_FLAVORS=true SSH_HOST=raspberrypi SSH_USER=sanchobot scripts/test_claw_flavors_over_ssh.sh
+
+# Iterate quickly on a subset of flavors
+RUN_ALL_FLAVORS=true FLAVORS_TO_TEST="picoclaw zeroclaw" SSH_HOST=raspberrypi SSH_USER=sanchobot scripts/test_claw_flavors_over_ssh.sh
 ```
 
 This validates:
@@ -202,6 +205,8 @@ This validates:
 - facade intermediary HTTP-chat path (`runtime profile -> facade mode -> proxy -> hailo-ollama`)
 - direct-vs-proxy compatibility matrix for Hailo endpoints
 - proxy OpenAI model discovery compatibility (`/v1/models`)
+- per-flavor minimal config preload (writes local-Hailo defaults before checks)
+- per-flavor minimal config artifact validation (`config.json` / `config.toml` / `.env` as applicable)
 - exhaustive flavor matrix via `RUN_ALL_FLAVORS=true` (`picoclaw`, `zeroclaw`, `nanobot`, `moltis`, `ironclaw`, `openclaw`)
 - per-flavor simple-query latency capture with end-of-run comparison table (`Query #1`, `Query #2`, `Total`, in seconds)
 
