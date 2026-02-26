@@ -212,6 +212,24 @@ This validates:
 
 ## Troubleshooting
 
+### Hailo package choice on AI HAT+ 2 (Hailo-10H)
+
+On Raspberry Pi 5 + AI HAT+ 2, use the Hailo-10H package path:
+
+```bash
+sudo apt install -y dkms hailo-h10-all
+```
+
+Avoid `hailo-all` on this hardware. It can pull Hailo-8/8L-era components and create runtime/driver mismatches.
+
+If you changed Hailo packages, reboot and re-check before continuing:
+
+```bash
+sudo reboot
+# after reconnect
+~/hailo-apps-infra/scripts/check_installed_packages.sh
+```
+
 ### Hailo AI HAT+ 2 not detected
 
 ```bash

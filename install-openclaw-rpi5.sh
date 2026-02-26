@@ -446,22 +446,22 @@ prepare_offline_bundle() {
     echo "For offline installation, you need to manually download Hailo packages."
     echo ""
     echo "Required packages:"
-    echo "  1. hailo-all (from Raspberry Pi apt repository)"
+    echo "  1. hailo-h10-all (from Raspberry Pi apt repository, for AI HAT+ 2 / Hailo-10H)"
     echo "  2. hailo_gen_ai_model_zoo (from Hailo Developer Zone)"
     echo ""
     echo "Steps to prepare Hailo packages:"
-    echo "  1. On a Pi with internet, run: apt download hailo-all"
+    echo "  1. On a Pi with internet, run: apt download hailo-h10-all"
     echo "  2. Download GenAI Model Zoo from: https://hailo.ai/developer-zone/software-downloads/"
     echo "  3. Copy .deb files to: $OFFLINE_DIR/hailo_debs/"
     echo ""
     
     mkdir -p hailo_debs
     
-    # Try to download hailo-all if apt is available
+    # Try to download Hailo-10H package if apt is available
     if command -v apt &> /dev/null; then
-        print_step "Attempting to download hailo-all package..."
+        print_step "Attempting to download hailo-h10-all package..."
         cd hailo_debs
-        apt download hailo-all 2>/dev/null || print_warn "hailo-all not available in apt (may need to run on Pi)"
+        apt download hailo-h10-all 2>/dev/null || print_warn "hailo-h10-all not available in apt (may need to run on Pi)"
         apt download dkms 2>/dev/null || true
         cd "$OFFLINE_DIR"
     fi
@@ -720,10 +720,10 @@ phase2_hailo_setup() {
         
         if [[ "$OFFLINE_MODE" == "true" ]]; then
             # Offline: Install from bundled .deb packages
-            if [[ -f "$OFFLINE_DIR/hailo_debs/hailo-all.deb" ]]; then
+            if compgen -G "$OFFLINE_DIR/hailo_debs/hailo-h10-all*.deb" > /dev/null; then
                 sudo dpkg -i "$OFFLINE_DIR/hailo_debs/"*.deb || sudo apt-get install -f -y
             else
-                print_warn "Hailo packages not found in offline bundle."
+                print_warn "Hailo-10H packages not found in offline bundle."
                 print_warn "You will need to install manually when internet is available."
             fi
         else
@@ -740,16 +740,22 @@ phase2_hailo_setup() {
         print_step "HailoRT already installed"
     fi
     
-    # Step 3: Ensure hailo_pci kernel module loads at boot and is loaded now.
-    # The hailort-pcie-driver package installs the module but doesn't always
-    # configure autoload, so /dev/hailo0 may be missing after reboot.
-    print_step "Ensuring hailo_pci kernel module is loaded..."
-    if ! lsmod | grep -q hailo_pci; then
-        sudo modprobe hailo_pci || print_warn "Failed to load hailo_pci module"
+    # Step 3: Ensure Hailo kernel module autoload is configured and module is loaded now.
+    # For Hailo-10H stacks, hailo1x_pci is expected. Keep hailo_pci as fallback for compatibility.
+    print_step "Ensuring Hailo kernel module is loaded (hailo1x_pci preferred)..."
+    if ! lsmod | grep -Eq 'hailo1x_pci|hailo_pci'; then
+        sudo modprobe hailo1x_pci 2>/dev/null || sudo modprobe hailo_pci || print_warn "Failed to load hailo kernel module"
     fi
-    if ! grep -q 'hailo_pci' /etc/modules-load.d/hailo.conf 2>/dev/null; then
-        echo "hailo_pci" | sudo tee /etc/modules-load.d/hailo.conf > /dev/null
-        print_step "hailo_pci added to /etc/modules-load.d/ for boot autoload"
+    if lsmod | grep -q '^hailo1x_pci'; then
+        if ! grep -q 'hailo1x_pci' /etc/modules-load.d/hailo.conf 2>/dev/null; then
+            echo "hailo1x_pci" | sudo tee /etc/modules-load.d/hailo.conf > /dev/null
+            print_step "hailo1x_pci added to /etc/modules-load.d/ for boot autoload"
+        fi
+    else
+        if ! grep -q 'hailo_pci' /etc/modules-load.d/hailo.conf 2>/dev/null; then
+            echo "hailo_pci" | sudo tee /etc/modules-load.d/hailo.conf > /dev/null
+            print_step "hailo_pci added to /etc/modules-load.d/ for boot autoload"
+        fi
     fi
     # Wait briefly for /dev/hailo0 to appear
     for i in $(seq 1 5); do

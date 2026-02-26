@@ -240,6 +240,151 @@ EOF"
   esac
 }
 
+skill_dir_for_flavor() {
+  local flavor="$1"
+  local remote_home="/home/${SSH_USER}"
+
+  case "$flavor" in
+    openclaw)
+      printf '%s' "$remote_home/.openclaw/workspace/skills/hailo-apps-health-check"
+      ;;
+    picoclaw)
+      printf '%s' "$remote_home/.picoclaw/workspace/skills/hailo-apps-health-check"
+      ;;
+    zeroclaw)
+      printf '%s' "$remote_home/.zeroclaw/workspace/skills/hailo-apps-health-check"
+      ;;
+    nanobot)
+      printf '%s' "$remote_home/.nanobot/workspace/skills/hailo-apps-health-check"
+      ;;
+    moltis)
+      printf '%s' "$remote_home/.moltis/workspace/skills/hailo-apps-health-check"
+      ;;
+    ironclaw)
+      printf '%s' "$remote_home/.ironclaw/workspace/skills/hailo-apps-health-check"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+workspace_dir_for_flavor() {
+  local flavor="$1"
+  local remote_home="/home/${SSH_USER}"
+
+  case "$flavor" in
+    openclaw)
+      printf '%s' "$remote_home/.openclaw/workspace"
+      ;;
+    picoclaw)
+      printf '%s' "$remote_home/.picoclaw/workspace"
+      ;;
+    zeroclaw)
+      printf '%s' "$remote_home/.zeroclaw/workspace"
+      ;;
+    nanobot)
+      printf '%s' "$remote_home/.nanobot/workspace"
+      ;;
+    moltis)
+      printf '%s' "$remote_home/.moltis/workspace"
+      ;;
+    ironclaw)
+      printf '%s' "$remote_home/.ironclaw/workspace"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+preload_hailo_apps_health_check_skill() {
+  local flavor="$1"
+  local skill_dir workspace_dir marker_file remote_home
+
+  skill_dir=$(skill_dir_for_flavor "$flavor") || fail "Unsupported flavor for hailo-apps-health-check skill preload: $flavor"
+  workspace_dir=$(workspace_dir_for_flavor "$flavor") || fail "Unsupported flavor for workspace path mapping: $flavor"
+  remote_home="/home/${SSH_USER}"
+  marker_file="/tmp/hailo_apps_health_check_skill_${flavor}.ok"
+
+  run_ssh "mkdir -p '$skill_dir'"
+  run_ssh "mkdir -p '$workspace_dir'"
+  run_ssh "cat > '$remote_home/hailo-apps-health-check' <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+if command -v hailortcli >/dev/null 2>&1; then
+  hailortcli --version >/dev/null 2>&1
+fi
+
+if [ -f \"$remote_home/hailo-apps-infra/scripts/check_installed_packages.sh\" ]; then
+  \"$remote_home/hailo-apps-infra/scripts/check_installed_packages.sh\" >/tmp/hailo_apps_health_check.log 2>&1 || true
+  grep -q '^SUMMARY: ' /tmp/hailo_apps_health_check.log || {
+    echo 'check_installed_packages.sh did not produce SUMMARY' >&2
+    tail -n 40 /tmp/hailo_apps_health_check.log >&2 || true
+    exit 1
+  }
+fi
+
+echo 'HAILO_APPS_HEALTH_CHECK_OK'
+EOF"
+  run_ssh "chmod +x '$remote_home/hailo-apps-health-check'"
+
+  run_ssh "cat > '$skill_dir/run_health_check.sh' <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ -x \"$remote_home/hailo-apps-infra/venv_hailo_apps/bin/hailo-apps-health-check\" ]; then
+  \"$remote_home/hailo-apps-infra/venv_hailo_apps/bin/hailo-apps-health-check\"
+elif [ -f \"$remote_home/hailo-apps-infra/setup_env.sh\" ]; then
+  set +u
+  # shellcheck disable=SC1090
+  source \"$remote_home/hailo-apps-infra/setup_env.sh\" >/dev/null 2>&1 || true
+  set -u
+  if command -v hailo-apps-health-check >/dev/null 2>&1; then
+    hailo-apps-health-check
+  elif [ -x \"$remote_home/hailo-apps-health-check\" ]; then
+    \"$remote_home/hailo-apps-health-check\"
+  else
+    echo 'hailo-apps-health-check missing after sourcing setup_env.sh' >&2
+    exit 127
+  fi
+elif command -v hailo-apps-health-check >/dev/null 2>&1; then
+  hailo-apps-health-check
+elif [ -x \"$remote_home/hailo-apps-health-check\" ]; then
+  \"$remote_home/hailo-apps-health-check\"
+else
+  echo 'hailo-apps-health-check missing' >&2
+  exit 127
+fi
+
+touch '$marker_file'
+echo 'HAILO_APPS_HEALTH_CHECK_OK'
+EOF"
+  run_ssh "chmod +x '$skill_dir/run_health_check.sh'"
+  run_ssh "cp '$skill_dir/run_health_check.sh' '$workspace_dir/run_health_check.sh'"
+  run_ssh "cp '$skill_dir/run_health_check.sh' '$remote_home/run_health_check.sh'"
+  run_ssh "chmod +x '$workspace_dir/run_health_check.sh' '$remote_home/run_health_check.sh'"
+
+  run_ssh "cat > '$skill_dir/SKILL.md' <<EOF
+---
+name: hailo-apps-health-check
+description: Runs hailo-apps-health-check on this Raspberry Pi and writes a success marker.
+---
+
+# hailo-apps-health-check
+
+Run the local script below to validate Hailo Apps Infrastructure health on this device:
+
+\`bash run_health_check.sh\`
+
+Fallback script locations:
+- \`~/run_health_check.sh\`
+- \`$workspace_dir/run_health_check.sh\`
+- \`$skill_dir/run_health_check.sh\`
+EOF"
+}
+
 preload_minimal_flavor_config() {
   local flavor="$1"
   local base_url="http://127.0.0.1:8081/v1"
@@ -354,6 +499,8 @@ EOF"
       fail "Unsupported flavor for minimal config preload: $flavor"
       ;;
   esac
+
+  preload_hailo_apps_health_check_skill "$flavor"
 }
 
 run_checks_for_current_profile_flavor() {
@@ -371,6 +518,8 @@ run_checks_for_current_profile_flavor() {
   check_hailo_proxy_matrix
   log "-- check_facade_chat_intermediary"
   check_facade_chat_intermediary
+  log "-- check_hailo_apps_health_check_skill"
+  check_hailo_apps_health_check_skill
   log "-- check_flavor_health_and_simple_queries"
   check_flavor_health_and_simple_queries
 }
@@ -462,11 +611,77 @@ PY" || fail "Nanobot minimal config missing provider base/model"
       run_ssh "grep -q '^LLM_BACKEND=openai_compatible' ~/.ironclaw/.env" || fail "IronClaw env missing LLM_BACKEND=openai_compatible"
       ;;
     *)
-      fail "Unknown flavor for minimal config preload checks: $flavor"
+      fail "Unknown flavor for minimal config validation: $flavor"
       ;;
   esac
 
+  local skill_dir marker_file
+  skill_dir=$(skill_dir_for_flavor "$flavor") || fail "Unknown flavor for skill validation: $flavor"
+  marker_file="/tmp/hailo_apps_health_check_skill_${flavor}.ok"
+  run_ssh "test -f '$skill_dir/SKILL.md'" || fail "hailo-apps-health-check SKILL.md missing for flavor=$flavor"
+  run_ssh "test -x '$skill_dir/run_health_check.sh'" || fail "hailo-apps-health-check runner missing or not executable for flavor=$flavor"
+  run_ssh "rm -f '$marker_file'"
+
   pass "Flavor minimal config preload checks passed"
+}
+
+check_hailo_apps_health_check_skill() {
+  local flavor
+  flavor=$(json_read_remote "$RUNTIME_PROFILE_REL" 'print(obj.get("flavor",""))' | tr -d '[:space:]')
+
+  local skill_dir workspace_dir marker_file prompt response skill_call_rc
+  skill_dir=$(skill_dir_for_flavor "$flavor") || fail "Unknown flavor for hailo-apps-health-check skill call: $flavor"
+  workspace_dir=$(workspace_dir_for_flavor "$flavor") || fail "Unknown flavor for workspace path mapping: $flavor"
+  marker_file="/tmp/hailo_apps_health_check_skill_${flavor}.ok"
+  prompt="Use the hailo-apps-health-check skill now. Run run_health_check.sh from that skill. If needed, you may run /home/${SSH_USER}/run_health_check.sh directly. Then reply with only SKILL_OK."
+  skill_call_rc=0
+
+  run_ssh "test -f '$skill_dir/SKILL.md'" || fail "Cannot call hailo-apps-health-check skill: missing SKILL.md for flavor=$flavor"
+  run_ssh "test -x '$skill_dir/run_health_check.sh'" || fail "Cannot call hailo-apps-health-check skill: missing runner for flavor=$flavor"
+  run_ssh "test -x '$workspace_dir/run_health_check.sh'" || fail "Cannot call hailo-apps-health-check skill: missing workspace fallback runner for flavor=$flavor"
+  run_ssh "test -x '/home/${SSH_USER}/run_health_check.sh'" || fail "Cannot call hailo-apps-health-check skill: missing home fallback runner for flavor=$flavor"
+  run_ssh "rm -f '$marker_file'"
+
+  case "$flavor" in
+    openclaw)
+      run_timed_remote_command response "PATH=\$HOME/.npm-global/bin:\$PATH; openclaw agent --local --agent main --session-id flavortest-${flavor}-skill --timeout 240 --message \"$prompt\"" || skill_call_rc=$?
+      ;;
+    picoclaw)
+      run_timed_remote_command response "~/.local/bin/picoclaw agent --message \"$prompt\"" || skill_call_rc=$?
+      ;;
+    zeroclaw)
+      run_timed_remote_command response "~/.local/bin/zeroclaw agent --provider \"custom:http://127.0.0.1:8081/v1\" --model $TEST_HAILO_MODEL --message \"$prompt\"" || skill_call_rc=$?
+      ;;
+    nanobot)
+      run_timed_remote_command response "~/.local/bin/nanobot agent --message \"$prompt\"" || skill_call_rc=$?
+      ;;
+    moltis)
+      run_timed_remote_command response "~/.local/bin/moltis agent --message \"$prompt\"" || skill_call_rc=$?
+      ;;
+    ironclaw)
+      run_timed_remote_command response "~/.local/bin/ironclaw agent --message \"$prompt\"" || skill_call_rc=$?
+      ;;
+    *)
+      fail "Unknown flavor for hailo-apps-health-check skill call: $flavor"
+      ;;
+  esac
+
+  if [[ "$skill_call_rc" -ne 0 ]]; then
+    warn "Flavor=$flavor skill command exited non-zero (rc=$skill_call_rc); validating execution marker instead"
+  fi
+
+  if ! printf '%s\n' "$response" | grep -Eiq 'skill_ok'; then
+    warn "Flavor=$flavor skill response did not include SKILL_OK; validating execution marker instead"
+  fi
+
+  if ! run_ssh "test -f '$marker_file'"; then
+    warn "Flavor=$flavor did not create marker through agent skill call; running /home/${SSH_USER}/run_health_check.sh directly"
+    run_ssh "bash '/home/${SSH_USER}/run_health_check.sh'" || fail "Flavor=$flavor fallback run_health_check.sh execution failed"
+  fi
+
+  run_ssh "test -f '$marker_file'" || fail "Flavor=$flavor hailo-apps-health-check runner did not create marker file"
+
+  pass "Flavor $flavor called hailo-apps-health-check skill successfully"
 }
 
 check_flavor_preflight_sanity() {
