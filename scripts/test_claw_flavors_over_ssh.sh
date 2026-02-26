@@ -21,6 +21,7 @@ warn() { printf 'WARN: %s\n' "$*" >&2; }
 declare -a QUERY_TIMING_FLAVORS=()
 declare -A QUERY_TIMING_QUERY1_SECONDS=()
 declare -A QUERY_TIMING_QUERY2_SECONDS=()
+declare -A QUERY_TIMING_QUERY3_SECONDS=()
 declare -A QUERY_TIMING_TOTAL_SECONDS=()
 
 TIMED_LAST_SECONDS=0
@@ -57,11 +58,24 @@ record_flavor_query_timing() {
   local flavor="$1"
   local query1_seconds="$2"
   local query2_seconds="$3"
-  local total_seconds=$((query1_seconds + query2_seconds))
+  local query3_seconds="${4:-${QUERY_TIMING_QUERY3_SECONDS[$flavor]:-0}}"
+  local total_seconds=$((query1_seconds + query2_seconds + query3_seconds))
 
   QUERY_TIMING_QUERY1_SECONDS["$flavor"]="$query1_seconds"
   QUERY_TIMING_QUERY2_SECONDS["$flavor"]="$query2_seconds"
+  QUERY_TIMING_QUERY3_SECONDS["$flavor"]="$query3_seconds"
   QUERY_TIMING_TOTAL_SECONDS["$flavor"]="$total_seconds"
+  add_query_timing_flavor "$flavor"
+}
+
+record_flavor_query3_timing() {
+  local flavor="$1"
+  local query3_seconds="$2"
+  local query1_seconds="${QUERY_TIMING_QUERY1_SECONDS[$flavor]:-0}"
+  local query2_seconds="${QUERY_TIMING_QUERY2_SECONDS[$flavor]:-0}"
+
+  QUERY_TIMING_QUERY3_SECONDS["$flavor"]="$query3_seconds"
+  QUERY_TIMING_TOTAL_SECONDS["$flavor"]=$((query1_seconds + query2_seconds + query3_seconds))
   add_query_timing_flavor "$flavor"
 }
 
@@ -73,15 +87,16 @@ print_query_timing_table() {
 
   log ""
   log "=== Flavor query timing comparison (seconds) ==="
-  printf '%-10s | %9s | %9s | %9s\n' "Flavor" "Query #1" "Query #2" "Total"
-  printf '%-10s-+-%9s-+-%9s-+-%9s\n' "----------" "---------" "---------" "---------"
+  printf '%-10s | %9s | %9s | %9s | %9s\n' "Flavor" "Query #1" "Query #2" "Query #3" "Total"
+  printf '%-10s-+-%9s-+-%9s-+-%9s-+-%9s\n' "----------" "---------" "---------" "---------" "---------"
 
   local flavor
   for flavor in "${QUERY_TIMING_FLAVORS[@]}"; do
-    printf '%-10s | %9s | %9s | %9s\n' \
+    printf '%-10s | %9s | %9s | %9s | %9s\n' \
       "$flavor" \
       "${QUERY_TIMING_QUERY1_SECONDS[$flavor]:-N/A}" \
       "${QUERY_TIMING_QUERY2_SECONDS[$flavor]:-N/A}" \
+      "${QUERY_TIMING_QUERY3_SECONDS[$flavor]:-N/A}" \
       "${QUERY_TIMING_TOTAL_SECONDS[$flavor]:-N/A}"
   done
 }
@@ -628,6 +643,8 @@ PY" || fail "Nanobot minimal config missing provider base/model"
 check_hailo_apps_health_check_skill() {
   local flavor
   flavor=$(json_read_remote "$RUNTIME_PROFILE_REL" 'print(obj.get("flavor",""))' | tr -d '[:space:]')
+  local skill_stage_started skill_stage_ended skill_stage_seconds
+  skill_stage_started=$(date +%s)
 
   local skill_dir workspace_dir marker_file prompt response skill_call_rc
   skill_dir=$(skill_dir_for_flavor "$flavor") || fail "Unknown flavor for hailo-apps-health-check skill call: $flavor"
@@ -680,6 +697,10 @@ check_hailo_apps_health_check_skill() {
   fi
 
   run_ssh "test -f '$marker_file'" || fail "Flavor=$flavor hailo-apps-health-check runner did not create marker file"
+
+  skill_stage_ended=$(date +%s)
+  skill_stage_seconds=$((skill_stage_ended - skill_stage_started))
+  record_flavor_query3_timing "$flavor" "$skill_stage_seconds"
 
   pass "Flavor $flavor called hailo-apps-health-check skill successfully"
 }
