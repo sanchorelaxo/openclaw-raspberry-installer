@@ -1308,7 +1308,7 @@ phase3_zeroclaw_install() {
     if [[ -d "$zero_dir/.git" ]]; then
         git -C "$zero_dir" pull --ff-only
     else
-        git clone https://github.com/openagen/zeroclaw.git "$zero_dir"
+        git clone https://github.com/zeroclaw-labs/zeroclaw.git "$zero_dir"
     fi
 
     print_step "Building ZeroClaw (release)..."
