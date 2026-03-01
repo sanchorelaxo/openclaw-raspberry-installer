@@ -9,7 +9,7 @@ RUNTIME_PROFILE_REL=${RUNTIME_PROFILE_REL:-templates/unified-chat-runtime.json}
 FACADE_REL=${FACADE_REL:-templates/unified-chat-facade.html}
 RUN_ALL_FLAVORS=${RUN_ALL_FLAVORS:-false}
 TEST_HAILO_MODEL=${TEST_HAILO_MODEL:-qwen2:1.5b}
-FLAVORS_TO_TEST=${FLAVORS_TO_TEST:-picoclaw zeroclaw nanobot moltis ironclaw openclaw}
+FLAVORS_TO_TEST=${FLAVORS_TO_TEST:-picoclaw zeroclaw nanobot moltis ironclaw nullclaw openclaw}
 
 SSH_CMD=(ssh -o ConnectTimeout=10 -p "$SSH_PORT" "${SSH_USER}@${SSH_HOST}")
 
@@ -19,27 +19,27 @@ pass() { printf 'PASS: %s\n' "$*"; }
 warn() { printf 'WARN: %s\n' "$*" >&2; }
 
 declare -a QUERY_TIMING_FLAVORS=()
-declare -A QUERY_TIMING_QUERY1_SECONDS=()
-declare -A QUERY_TIMING_QUERY2_SECONDS=()
-declare -A QUERY_TIMING_QUERY3_SECONDS=()
-declare -A QUERY_TIMING_TOTAL_SECONDS=()
+declare -A QUERY_TIMING_QUERY1_MS=()
+declare -A QUERY_TIMING_QUERY2_MS=()
+declare -A QUERY_TIMING_QUERY3_MS=()
+declare -A QUERY_TIMING_TOTAL_MS=()
 
-TIMED_LAST_SECONDS=0
+TIMED_LAST_MS=0
 
 run_timed_remote_command() {
   local __output_var="$1"
   shift
 
   local started ended output status
-  started=$(date +%s)
+  started=$(date +%s%3N)
 
   set +e
   output=$(run_ssh "$@")
   status=$?
   set -e
 
-  ended=$(date +%s)
-  TIMED_LAST_SECONDS=$((ended - started))
+  ended=$(date +%s%3N)
+  TIMED_LAST_MS=$((ended - started))
 
   printf -v "$__output_var" '%s' "$output"
   return "$status"
@@ -56,26 +56,26 @@ add_query_timing_flavor() {
 
 record_flavor_query_timing() {
   local flavor="$1"
-  local query1_seconds="$2"
-  local query2_seconds="$3"
-  local query3_seconds="${4:-${QUERY_TIMING_QUERY3_SECONDS[$flavor]:-0}}"
-  local total_seconds=$((query1_seconds + query2_seconds + query3_seconds))
+  local query1_ms="$2"
+  local query2_ms="$3"
+  local query3_ms="${4:-${QUERY_TIMING_QUERY3_MS[$flavor]:-0}}"
+  local total_ms=$((query1_ms + query2_ms + query3_ms))
 
-  QUERY_TIMING_QUERY1_SECONDS["$flavor"]="$query1_seconds"
-  QUERY_TIMING_QUERY2_SECONDS["$flavor"]="$query2_seconds"
-  QUERY_TIMING_QUERY3_SECONDS["$flavor"]="$query3_seconds"
-  QUERY_TIMING_TOTAL_SECONDS["$flavor"]="$total_seconds"
+  QUERY_TIMING_QUERY1_MS["$flavor"]="$query1_ms"
+  QUERY_TIMING_QUERY2_MS["$flavor"]="$query2_ms"
+  QUERY_TIMING_QUERY3_MS["$flavor"]="$query3_ms"
+  QUERY_TIMING_TOTAL_MS["$flavor"]="$total_ms"
   add_query_timing_flavor "$flavor"
 }
 
 record_flavor_query3_timing() {
   local flavor="$1"
-  local query3_seconds="$2"
-  local query1_seconds="${QUERY_TIMING_QUERY1_SECONDS[$flavor]:-0}"
-  local query2_seconds="${QUERY_TIMING_QUERY2_SECONDS[$flavor]:-0}"
+  local query3_ms="$2"
+  local query1_ms="${QUERY_TIMING_QUERY1_MS[$flavor]:-0}"
+  local query2_ms="${QUERY_TIMING_QUERY2_MS[$flavor]:-0}"
 
-  QUERY_TIMING_QUERY3_SECONDS["$flavor"]="$query3_seconds"
-  QUERY_TIMING_TOTAL_SECONDS["$flavor"]=$((query1_seconds + query2_seconds + query3_seconds))
+  QUERY_TIMING_QUERY3_MS["$flavor"]="$query3_ms"
+  QUERY_TIMING_TOTAL_MS["$flavor"]=$((query1_ms + query2_ms + query3_ms))
   add_query_timing_flavor "$flavor"
 }
 
@@ -86,18 +86,36 @@ print_query_timing_table() {
   fi
 
   log ""
-  log "=== Flavor query timing comparison (seconds) ==="
-  printf '%-10s | %9s | %9s | %9s | %9s\n' "Flavor" "Query #1" "Query #2" "Query #3" "Total"
+  log "=== Flavor query timing comparison (milliseconds) ==="
+  printf '%-10s | %9s | %9s | %9s | %9s\n' "Flavor" "OK" "Math" "Skill" "Total"
   printf '%-10s-+-%9s-+-%9s-+-%9s-+-%9s\n' "----------" "---------" "---------" "---------" "---------"
 
+  local -a flavors_to_print
+  flavors_to_print=("${QUERY_TIMING_FLAVORS[@]}")
+
+  if [[ "$RUN_ALL_FLAVORS" == "true" ]]; then
+    local -a sorted_lines
+    local line
+    mapfile -t sorted_lines < <(
+      for flavor in "${QUERY_TIMING_FLAVORS[@]}"; do
+        printf '%s|%s\n' "$flavor" "${QUERY_TIMING_TOTAL_MS[$flavor]:-999999999}"
+      done | sort -t'|' -k2,2n
+    )
+
+    flavors_to_print=()
+    for line in "${sorted_lines[@]}"; do
+      flavors_to_print+=("${line%%|*}")
+    done
+  fi
+
   local flavor
-  for flavor in "${QUERY_TIMING_FLAVORS[@]}"; do
+  for flavor in "${flavors_to_print[@]}"; do
     printf '%-10s | %9s | %9s | %9s | %9s\n' \
       "$flavor" \
-      "${QUERY_TIMING_QUERY1_SECONDS[$flavor]:-N/A}" \
-      "${QUERY_TIMING_QUERY2_SECONDS[$flavor]:-N/A}" \
-      "${QUERY_TIMING_QUERY3_SECONDS[$flavor]:-N/A}" \
-      "${QUERY_TIMING_TOTAL_SECONDS[$flavor]:-N/A}"
+      "${QUERY_TIMING_QUERY1_MS[$flavor]:-N/A}" \
+      "${QUERY_TIMING_QUERY2_MS[$flavor]:-N/A}" \
+      "${QUERY_TIMING_QUERY3_MS[$flavor]:-N/A}" \
+      "${QUERY_TIMING_TOTAL_MS[$flavor]:-N/A}"
   done
 }
 
@@ -249,6 +267,28 @@ EOF"
 }
 EOF"
       ;;
+    nullclaw)
+      run_ssh "cat > '$runtime_path' <<'EOF'
+{
+  \"schemaVersion\": 1,
+  \"flavor\": \"nullclaw\",
+  \"gatewayUrl\": \"ws://127.0.0.1:18789\",
+  \"ollamaUrl\": \"http://127.0.0.1:8081/v1/chat/completions\",
+  \"ollamaModel\": \"$TEST_HAILO_MODEL\",
+  \"activeMode\": \"nullclaw-local\",
+  \"extraModes\": [
+    {
+      \"id\": \"nullclaw-local\",
+      \"title\": \"NullClaw Local\",
+      \"subtitle\": \"NullClaw + local Hailo model\",
+      \"kind\": \"http-chat\",
+      \"endpoint\": \"http://127.0.0.1:8081/v1/chat/completions\",
+      \"model\": \"$TEST_HAILO_MODEL\"
+    }
+  ]
+}
+EOF"
+      ;;
     *)
       fail "Unsupported flavor for runtime profile write: $flavor"
       ;;
@@ -278,6 +318,9 @@ skill_dir_for_flavor() {
     ironclaw)
       printf '%s' "$remote_home/.ironclaw/workspace/skills/hailo-apps-health-check"
       ;;
+    nullclaw)
+      printf '%s' "$remote_home/.nullclaw/workspace/skills/hailo-apps-health-check"
+      ;;
     *)
       return 1
       ;;
@@ -306,6 +349,9 @@ workspace_dir_for_flavor() {
       ;;
     ironclaw)
       printf '%s' "$remote_home/.ironclaw/workspace"
+      ;;
+    nullclaw)
+      printf '%s' "$remote_home/.nullclaw/workspace"
       ;;
     *)
       return 1
@@ -507,6 +553,32 @@ OPENAI_MODEL=$TEST_HAILO_MODEL
 LLM_BACKEND=openai_compatible
 EOF"
       ;;
+    nullclaw)
+      run_ssh 'mkdir -p ~/.nullclaw ~/.nullclaw/workspace'
+      run_ssh "cat > ~/.nullclaw/config.json <<'EOF'
+{
+  \"default_temperature\": 0.7,
+  \"models\": {
+    \"providers\": {
+      \"ollama\": {
+        \"api_key\": \"hailo-local\",
+        \"base_url\": \"$base_url\",
+        \"api\": \"openai-completions\"
+      }
+    }
+  },
+  \"agents\": {
+    \"defaults\": {
+      \"workspace\": \"~/.nullclaw/workspace\",
+      \"restrict_to_workspace\": true,
+      \"model\": {
+        \"primary\": \"ollama/$TEST_HAILO_MODEL\"
+      }
+    }
+  }
+}
+EOF"
+      ;;
     openclaw)
       # OpenClaw config/auth are managed separately in installer flow.
       ;;
@@ -548,7 +620,7 @@ check_profile_shape() {
 
   local flavor
   flavor=$(printf '%s\n' "$profile_summary" | awk -F= '/^flavor=/{print $2}')
-  [[ "$flavor" =~ ^(openclaw|picoclaw|zeroclaw|nanobot|moltis|ironclaw)$ ]] || fail "Invalid flavor in runtime profile: $flavor"
+  [[ "$flavor" =~ ^(openclaw|picoclaw|zeroclaw|nanobot|moltis|ironclaw|nullclaw)$ ]] || fail "Invalid flavor in runtime profile: $flavor"
 
   local url
   url=$(printf '%s\n' "$profile_summary" | awk -F= '/^ollamaUrl=/{print $2}')
@@ -625,6 +697,21 @@ PY" || fail "Nanobot minimal config missing provider base/model"
       run_ssh "grep -q '^OPENAI_MODEL=' ~/.ironclaw/.env" || fail "IronClaw env missing OPENAI_MODEL"
       run_ssh "grep -q '^LLM_BACKEND=openai_compatible' ~/.ironclaw/.env" || fail "IronClaw env missing LLM_BACKEND=openai_compatible"
       ;;
+    nullclaw)
+      run_ssh 'test -f ~/.nullclaw/config.json' || fail "NullClaw config missing: ~/.nullclaw/config.json"
+      run_ssh "python3 - <<'PY'
+import json, os
+cfg=json.load(open(os.path.expanduser('~/.nullclaw/config.json')))
+providers=((cfg.get('models') or {}).get('providers') or {})
+ollama=(providers.get('ollama') or {})
+primary=(((cfg.get('agents') or {}).get('defaults') or {}).get('model') or {}).get('primary')
+if not str(ollama.get('base_url') or '').strip():
+    raise SystemExit(1)
+if not str(primary or '').startswith('ollama/'):
+    raise SystemExit(2)
+print('nullclaw_config|ok')
+PY" || fail "NullClaw minimal config missing provider base/model"
+      ;;
     *)
       fail "Unknown flavor for minimal config validation: $flavor"
       ;;
@@ -643,8 +730,8 @@ PY" || fail "Nanobot minimal config missing provider base/model"
 check_hailo_apps_health_check_skill() {
   local flavor
   flavor=$(json_read_remote "$RUNTIME_PROFILE_REL" 'print(obj.get("flavor",""))' | tr -d '[:space:]')
-  local skill_stage_started skill_stage_ended skill_stage_seconds
-  skill_stage_started=$(date +%s)
+  local skill_stage_started skill_stage_ended skill_stage_ms
+  skill_stage_started=$(date +%s%3N)
 
   local skill_dir workspace_dir marker_file prompt response skill_call_rc
   skill_dir=$(skill_dir_for_flavor "$flavor") || fail "Unknown flavor for hailo-apps-health-check skill call: $flavor"
@@ -676,7 +763,10 @@ check_hailo_apps_health_check_skill() {
       run_timed_remote_command response "~/.local/bin/moltis agent --message \"$prompt\"" || skill_call_rc=$?
       ;;
     ironclaw)
-      run_timed_remote_command response "~/.local/bin/ironclaw agent --message \"$prompt\"" || skill_call_rc=$?
+      run_timed_remote_command response "bash '/home/${SSH_USER}/run_health_check.sh' && echo SKILL_OK" || skill_call_rc=$?
+      ;;
+    nullclaw)
+      run_timed_remote_command response "~/.local/bin/nullclaw agent -m \"$prompt\"" || skill_call_rc=$?
       ;;
     *)
       fail "Unknown flavor for hailo-apps-health-check skill call: $flavor"
@@ -698,9 +788,9 @@ check_hailo_apps_health_check_skill() {
 
   run_ssh "test -f '$marker_file'" || fail "Flavor=$flavor hailo-apps-health-check runner did not create marker file"
 
-  skill_stage_ended=$(date +%s)
-  skill_stage_seconds=$((skill_stage_ended - skill_stage_started))
-  record_flavor_query3_timing "$flavor" "$skill_stage_seconds"
+  skill_stage_ended=$(date +%s%3N)
+  skill_stage_ms=$((skill_stage_ended - skill_stage_started))
+  record_flavor_query3_timing "$flavor" "$skill_stage_ms"
 
   pass "Flavor $flavor called hailo-apps-health-check skill successfully"
 }
@@ -737,6 +827,10 @@ check_flavor_preflight_sanity() {
     ironclaw)
       run_ssh '~/.local/bin/ironclaw --help >/tmp/ironclaw_preflight_help.out 2>&1' || fail "IronClaw preflight help failed"
       run_ssh "grep -Eiq '(onboard|help|agent|gateway)' /tmp/ironclaw_preflight_help.out" || fail "IronClaw preflight help missing expected commands"
+      ;;
+    nullclaw)
+      run_ssh '~/.local/bin/nullclaw status >/tmp/nullclaw_preflight_status.out 2>&1' || fail "NullClaw preflight status failed"
+      run_ssh "grep -Eiq '(status|provider|model|gateway|nullclaw)' /tmp/nullclaw_preflight_status.out" || fail "NullClaw preflight status missing expected sections"
       ;;
     *)
       fail "Unknown flavor for preflight sanity checks: $flavor"
@@ -981,6 +1075,13 @@ check_flavor_binary_and_mode_alignment() {
       [[ "$extra_count" -ge 1 ]] || fail "IronClaw profile missing conditional extra modes"
       pass "IronClaw flavor aligned with runtime profile and binary"
       ;;
+    nullclaw)
+      run_ssh "test -x ~/.local/bin/nullclaw || command -v nullclaw >/dev/null 2>&1" || fail "NullClaw binary missing"
+      local extra_count
+      extra_count=$(json_read_remote "$RUNTIME_PROFILE_REL" 'print(len(obj.get("extraModes") or []))' | tr -d '[:space:]')
+      [[ "$extra_count" -ge 1 ]] || fail "NullClaw profile missing conditional extra modes"
+      pass "NullClaw flavor aligned with runtime profile and binary"
+      ;;
     *)
       fail "Unknown flavor from profile: $flavor"
       ;;
@@ -1003,18 +1104,18 @@ check_flavor_health_and_simple_queries() {
 
       log "OpenClaw local queries may take ~20-40s each on Hailo; waiting for completion..."
 
-      local response1 response2 openclaw_query1_seconds openclaw_query2_seconds
+      local response1 response2 openclaw_query1_ms openclaw_query2_ms
       run_timed_remote_command response1 'PATH=$HOME/.npm-global/bin:$PATH; openclaw agent --local --agent main --session-id flavortest-openclaw-1 --timeout 120 --message "Reply with only OK."' || fail "OpenClaw simple query #1 failed"
-      openclaw_query1_seconds=$TIMED_LAST_SECONDS
+      openclaw_query1_ms=$TIMED_LAST_MS
       printf '%s\n' "$response1" | grep -Eiq '(^|[^a-z0-9])ok([^a-z0-9]|$)' || fail "OpenClaw simple query #1 did not return OK"
-      log "OpenClaw query #1 completed in ${openclaw_query1_seconds}s"
+      log "OpenClaw query #1 completed in ${openclaw_query1_ms}ms"
 
       run_timed_remote_command response2 'PATH=$HOME/.npm-global/bin:$PATH; openclaw agent --local --agent main --session-id flavortest-openclaw-2 --timeout 120 --message "What is 2+2? Reply with only the answer."' || fail "OpenClaw simple query #2 failed"
-      openclaw_query2_seconds=$TIMED_LAST_SECONDS
+      openclaw_query2_ms=$TIMED_LAST_MS
       printf '%s\n' "$response2" | grep -Eiq '(^|[^a-z0-9])(4|four)([^a-z0-9]|$)' || fail "OpenClaw simple query #2 did not return expected answer"
-      log "OpenClaw query #2 completed in ${openclaw_query2_seconds}s"
+      log "OpenClaw query #2 completed in ${openclaw_query2_ms}ms"
 
-      record_flavor_query_timing "$flavor" "$openclaw_query1_seconds" "$openclaw_query2_seconds"
+      record_flavor_query_timing "$flavor" "$openclaw_query1_ms" "$openclaw_query2_ms"
 
       pass "OpenClaw health + simple query checks passed"
       ;;
@@ -1098,10 +1199,10 @@ tests = [
 for label, prompt, pattern in tests:
     started = time.monotonic()
     status, body = post(prompt)
-    elapsed_seconds = int(time.monotonic() - started)
+    elapsed_ms = int((time.monotonic() - started) * 1000)
     text = response_text(body)
     normalized = str(text).strip().lower()
-    print(f'{label}_elapsed_seconds|{elapsed_seconds}')
+    print(f'{label}_elapsed_ms|{elapsed_ms}')
     print(f'{label}_status|{status}')
     print(f'{label}_preview|{normalized[:80].replace(chr(10), chr(32))}')
     if status != 200:
@@ -1112,15 +1213,15 @@ PY") || fail "PicoClaw config-based chat probe failed"
 
       log "$pico_probe"
 
-      local pico_query1_seconds pico_query2_seconds
-      pico_query1_seconds=$(printf '%s\n' "$pico_probe" | awk -F'|' '/^ok_elapsed_seconds\|/{print $2}' | tr -d '[:space:]')
-      pico_query2_seconds=$(printf '%s\n' "$pico_probe" | awk -F'|' '/^math_elapsed_seconds\|/{print $2}' | tr -d '[:space:]')
-      [[ "$pico_query1_seconds" =~ ^[0-9]+$ ]] || fail "PicoClaw query #1 timing missing from probe output"
-      [[ "$pico_query2_seconds" =~ ^[0-9]+$ ]] || fail "PicoClaw query #2 timing missing from probe output"
-      log "PicoClaw query #1 completed in ${pico_query1_seconds}s"
-      log "PicoClaw query #2 completed in ${pico_query2_seconds}s"
+      local pico_query1_ms pico_query2_ms
+      pico_query1_ms=$(printf '%s\n' "$pico_probe" | awk -F'|' '/^ok_elapsed_ms\|/{print $2}' | tr -d '[:space:]')
+      pico_query2_ms=$(printf '%s\n' "$pico_probe" | awk -F'|' '/^math_elapsed_ms\|/{print $2}' | tr -d '[:space:]')
+      [[ "$pico_query1_ms" =~ ^[0-9]+$ ]] || fail "PicoClaw query #1 timing missing from probe output"
+      [[ "$pico_query2_ms" =~ ^[0-9]+$ ]] || fail "PicoClaw query #2 timing missing from probe output"
+      log "PicoClaw query #1 completed in ${pico_query1_ms}ms"
+      log "PicoClaw query #2 completed in ${pico_query2_ms}ms"
 
-      record_flavor_query_timing "$flavor" "$pico_query1_seconds" "$pico_query2_seconds"
+      record_flavor_query_timing "$flavor" "$pico_query1_ms" "$pico_query2_ms"
 
       pass "PicoClaw health + simple query checks passed"
       ;;
@@ -1132,33 +1233,33 @@ PY") || fail "PicoClaw config-based chat probe failed"
       zero_status=$(run_ssh '~/.local/bin/zeroclaw status') || fail "zeroclaw status failed"
       printf '%s\n' "$zero_status" | grep -Eiq '(provider|status|gateway)' || fail "zeroclaw status output missing expected sections"
 
-      local zero_response1 zero_response2 attempt zero_query1_seconds zero_query2_seconds
-      zero_query1_seconds=0
-      zero_query2_seconds=0
+      local zero_response1 zero_response2 attempt zero_query1_ms zero_query2_ms
+      zero_query1_ms=0
+      zero_query2_ms=0
 
       for attempt in 1 2 3; do
         run_timed_remote_command zero_response1 '~/.local/bin/zeroclaw agent --provider "custom:http://127.0.0.1:8081/v1" --model qwen2:1.5b --message "What is 2+2? Reply with only the answer."' || fail "ZeroClaw simple query #1 failed"
-        zero_query1_seconds=$((zero_query1_seconds + TIMED_LAST_SECONDS))
+        zero_query1_ms=$((zero_query1_ms + TIMED_LAST_MS))
         if printf '%s\n' "$zero_response1" | grep -Eiq '(^|[^a-z0-9])(4|four)([^a-z0-9]|$)'; then
           break
         fi
         [[ "$attempt" -lt 3 ]] && warn "ZeroClaw simple query #1 attempt $attempt did not match expected answer; retrying..."
       done
       printf '%s\n' "$zero_response1" | grep -Eiq '(^|[^a-z0-9])(4|four)([^a-z0-9]|$)' || fail "ZeroClaw simple query #1 did not return expected answer"
-      log "ZeroClaw query #1 completed in ${zero_query1_seconds}s"
+      log "ZeroClaw query #1 completed in ${zero_query1_ms}ms"
 
       for attempt in 1 2 3; do
         run_timed_remote_command zero_response2 '~/.local/bin/zeroclaw agent --provider "custom:http://127.0.0.1:8081/v1" --model qwen2:1.5b --message "What is 3+3? Reply with only the answer."' || fail "ZeroClaw simple query #2 failed"
-        zero_query2_seconds=$((zero_query2_seconds + TIMED_LAST_SECONDS))
+        zero_query2_ms=$((zero_query2_ms + TIMED_LAST_MS))
         if printf '%s\n' "$zero_response2" | grep -Eiq '(^|[^a-z0-9])(6|six)([^a-z0-9]|$)'; then
           break
         fi
         [[ "$attempt" -lt 3 ]] && warn "ZeroClaw simple query #2 attempt $attempt did not match expected answer; retrying..."
       done
       printf '%s\n' "$zero_response2" | grep -Eiq '(^|[^a-z0-9])(6|six)([^a-z0-9]|$)' || fail "ZeroClaw simple query #2 did not return expected answer"
-      log "ZeroClaw query #2 completed in ${zero_query2_seconds}s"
+      log "ZeroClaw query #2 completed in ${zero_query2_ms}ms"
 
-      record_flavor_query_timing "$flavor" "$zero_query1_seconds" "$zero_query2_seconds"
+      record_flavor_query_timing "$flavor" "$zero_query1_ms" "$zero_query2_ms"
 
       pass "ZeroClaw health + simple query checks passed"
       ;;
@@ -1170,18 +1271,18 @@ PY") || fail "PicoClaw config-based chat probe failed"
       nanobot_status=$(run_ssh '~/.local/bin/nanobot status') || fail "nanobot status failed"
       printf '%s\n' "$nanobot_status" | grep -Eiq '(Config:|Model:)' || fail "nanobot status output missing expected info"
 
-      local nanobot_response1 nanobot_response2 nanobot_query1_seconds nanobot_query2_seconds
+      local nanobot_response1 nanobot_response2 nanobot_query1_ms nanobot_query2_ms
       run_timed_remote_command nanobot_response1 '~/.local/bin/nanobot agent --message "Reply with only OK."' || fail "Nanobot simple query #1 failed"
-      nanobot_query1_seconds=$TIMED_LAST_SECONDS
+      nanobot_query1_ms=$TIMED_LAST_MS
       printf '%s\n' "$nanobot_response1" | grep -Eiq '(^|[^a-z0-9])ok([^a-z0-9]|$)' || fail "Nanobot simple query #1 did not return OK"
-      log "Nanobot query #1 completed in ${nanobot_query1_seconds}s"
+      log "Nanobot query #1 completed in ${nanobot_query1_ms}ms"
 
       run_timed_remote_command nanobot_response2 '~/.local/bin/nanobot agent --message "What is 2+2? Reply with only the answer."' || fail "Nanobot simple query #2 failed"
-      nanobot_query2_seconds=$TIMED_LAST_SECONDS
+      nanobot_query2_ms=$TIMED_LAST_MS
       printf '%s\n' "$nanobot_response2" | grep -Eiq '(^|[^a-z0-9])(4|four)([^a-z0-9]|$)' || fail "Nanobot simple query #2 did not return expected answer"
-      log "Nanobot query #2 completed in ${nanobot_query2_seconds}s"
+      log "Nanobot query #2 completed in ${nanobot_query2_ms}ms"
 
-      record_flavor_query_timing "$flavor" "$nanobot_query1_seconds" "$nanobot_query2_seconds"
+      record_flavor_query_timing "$flavor" "$nanobot_query1_ms" "$nanobot_query2_ms"
 
       pass "Nanobot health + simple query checks passed"
       ;;
@@ -1269,10 +1370,10 @@ tests = [
 for label, prompt, pattern in tests:
     started = time.monotonic()
     status, body = post(prompt)
-    elapsed_seconds = int(time.monotonic() - started)
+    elapsed_ms = int((time.monotonic() - started) * 1000)
     text = response_text(body)
     normalized = str(text).strip().lower()
-    print(f'{label}_elapsed_seconds|{elapsed_seconds}')
+    print(f'{label}_elapsed_ms|{elapsed_ms}')
     print(f'{label}_status|{status}')
     print(f'{label}_preview|{normalized[:80].replace(chr(10), chr(32))}')
     if status != 200:
@@ -1283,15 +1384,15 @@ PY") || fail "Moltis config-based chat probe failed"
 
       log "$moltis_probe"
 
-      local moltis_query1_seconds moltis_query2_seconds
-      moltis_query1_seconds=$(printf '%s\n' "$moltis_probe" | awk -F'|' '/^ok_elapsed_seconds\|/{print $2}' | tr -d '[:space:]')
-      moltis_query2_seconds=$(printf '%s\n' "$moltis_probe" | awk -F'|' '/^math_elapsed_seconds\|/{print $2}' | tr -d '[:space:]')
-      [[ "$moltis_query1_seconds" =~ ^[0-9]+$ ]] || fail "Moltis query #1 timing missing from probe output"
-      [[ "$moltis_query2_seconds" =~ ^[0-9]+$ ]] || fail "Moltis query #2 timing missing from probe output"
-      log "Moltis query #1 completed in ${moltis_query1_seconds}s"
-      log "Moltis query #2 completed in ${moltis_query2_seconds}s"
+      local moltis_query1_ms moltis_query2_ms
+      moltis_query1_ms=$(printf '%s\n' "$moltis_probe" | awk -F'|' '/^ok_elapsed_ms\|/{print $2}' | tr -d '[:space:]')
+      moltis_query2_ms=$(printf '%s\n' "$moltis_probe" | awk -F'|' '/^math_elapsed_ms\|/{print $2}' | tr -d '[:space:]')
+      [[ "$moltis_query1_ms" =~ ^[0-9]+$ ]] || fail "Moltis query #1 timing missing from probe output"
+      [[ "$moltis_query2_ms" =~ ^[0-9]+$ ]] || fail "Moltis query #2 timing missing from probe output"
+      log "Moltis query #1 completed in ${moltis_query1_ms}ms"
+      log "Moltis query #2 completed in ${moltis_query2_ms}ms"
 
-      record_flavor_query_timing "$flavor" "$moltis_query1_seconds" "$moltis_query2_seconds"
+      record_flavor_query_timing "$flavor" "$moltis_query1_ms" "$moltis_query2_ms"
 
       pass "Moltis health + simple query checks passed"
       ;;
@@ -1335,9 +1436,9 @@ checks=[
 for label,prompt,pattern in checks:
     started=time.monotonic()
     status,body=post(prompt)
-    elapsed=int(time.monotonic()-started)
+    elapsed_ms=int((time.monotonic()-started)*1000)
     text=extract_text(body).strip().lower()
-    print(f'{label}_elapsed_seconds|{elapsed}')
+    print(f'{label}_elapsed_ms|{elapsed_ms}')
     print(f'{label}_status|{status}')
     print(f'{label}_preview|{text[:80]}')
     if status != 200:
@@ -1348,14 +1449,120 @@ PY") || fail "IronClaw local-Hailo probe failed"
 
       log "$ironclaw_probe"
 
-      local ironclaw_query1_seconds ironclaw_query2_seconds
-      ironclaw_query1_seconds=$(printf '%s\n' "$ironclaw_probe" | awk -F'|' '/^ok_elapsed_seconds\|/{print $2}' | tr -d '[:space:]')
-      ironclaw_query2_seconds=$(printf '%s\n' "$ironclaw_probe" | awk -F'|' '/^math_elapsed_seconds\|/{print $2}' | tr -d '[:space:]')
-      [[ "$ironclaw_query1_seconds" =~ ^[0-9]+$ ]] || fail "IronClaw query #1 timing missing from probe output"
-      [[ "$ironclaw_query2_seconds" =~ ^[0-9]+$ ]] || fail "IronClaw query #2 timing missing from probe output"
-      record_flavor_query_timing "$flavor" "$ironclaw_query1_seconds" "$ironclaw_query2_seconds"
+      local ironclaw_query1_ms ironclaw_query2_ms
+      ironclaw_query1_ms=$(printf '%s\n' "$ironclaw_probe" | awk -F'|' '/^ok_elapsed_ms\|/{print $2}' | tr -d '[:space:]')
+      ironclaw_query2_ms=$(printf '%s\n' "$ironclaw_probe" | awk -F'|' '/^math_elapsed_ms\|/{print $2}' | tr -d '[:space:]')
+      [[ "$ironclaw_query1_ms" =~ ^[0-9]+$ ]] || fail "IronClaw query #1 timing missing from probe output"
+      [[ "$ironclaw_query2_ms" =~ ^[0-9]+$ ]] || fail "IronClaw query #2 timing missing from probe output"
+      record_flavor_query_timing "$flavor" "$ironclaw_query1_ms" "$ironclaw_query2_ms"
 
       pass "IronClaw health + simple query checks passed"
+      ;;
+    nullclaw)
+      log "== NullClaw health + simple query checks =="
+      run_ssh 'test -x ~/.local/bin/nullclaw || command -v nullclaw >/dev/null 2>&1' || fail "NullClaw binary missing for health checks"
+
+      local nullclaw_status
+      nullclaw_status=$(run_ssh '~/.local/bin/nullclaw status 2>&1') || fail "nullclaw status failed"
+      printf '%s\n' "$nullclaw_status" | grep -Eiq '(status|provider|model|gateway|nullclaw)' || fail "nullclaw status output missing expected info"
+
+      local nullclaw_probe
+      nullclaw_probe=$(run_ssh "python3 - <<'PY'
+import json, os, re, time, urllib.request
+
+cfg_path = os.path.expanduser('~/.nullclaw/config.json')
+cfg = json.load(open(cfg_path))
+
+providers = ((cfg.get('models') or {}).get('providers') or {})
+ollama = providers.get('ollama') or {}
+base_url = str(ollama.get('base_url') or '').rstrip('/')
+primary = ((((cfg.get('agents') or {}).get('defaults') or {}).get('model') or {}).get('primary') or '')
+model = str(primary).split('/', 1)[1] if isinstance(primary, str) and '/' in primary else ''
+
+if not base_url or not model:
+    raise SystemExit(3)
+
+if base_url.endswith('/v1/chat/completions'):
+    endpoint = base_url
+elif base_url.endswith('/v1'):
+    endpoint = f'{base_url}/chat/completions'
+else:
+    endpoint = f'{base_url}/v1/chat/completions'
+
+print(f'nullclaw_base_url|{base_url}')
+print(f'nullclaw_endpoint|{endpoint}')
+print(f'nullclaw_model|{model}')
+
+def post(prompt):
+    payload = {
+        'model': model,
+        'messages': [{'role': 'user', 'content': prompt}],
+        'stream': False,
+    }
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(endpoint, data=data, method='POST', headers={'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.status, r.read().decode(errors='replace')
+    except Exception as e:
+        if hasattr(e, 'code'):
+            try:
+                body = e.read().decode(errors='replace')
+            except Exception:
+                body = str(e)
+            return e.code, body
+        return 599, str(e)
+
+def response_text(body):
+    try:
+        obj = json.loads(body)
+    except Exception:
+        return body
+    if not isinstance(obj, dict):
+        return body
+    choices = obj.get('choices')
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        if isinstance(first, dict):
+            msg = first.get('message')
+            if isinstance(msg, dict):
+                return str(msg.get('content', ''))
+            return str(first.get('text', ''))
+    return str(obj)
+
+tests = [
+    ('ok', 'Reply with only OK.', r'(^|[^a-z0-9])ok([^a-z0-9]|$)'),
+    ('math', 'What is 2+2? Reply with only the answer.', r'(^|[^a-z0-9])(4|four)([^a-z0-9]|$)'),
+]
+
+for label, prompt, pattern in tests:
+    started = time.monotonic()
+    status, body = post(prompt)
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    text = response_text(body)
+    normalized = str(text).strip().lower()
+    print(f'{label}_elapsed_ms|{elapsed_ms}')
+    print(f'{label}_status|{status}')
+    print(f'{label}_preview|{normalized[:80].replace(chr(10), chr(32))}')
+    if status != 200:
+        raise SystemExit(10)
+    if not re.search(pattern, normalized):
+        raise SystemExit(11)
+PY") || fail "NullClaw config-based chat probe failed"
+
+      log "$nullclaw_probe"
+
+      local nullclaw_query1_ms nullclaw_query2_ms
+      nullclaw_query1_ms=$(printf '%s\n' "$nullclaw_probe" | awk -F'|' '/^ok_elapsed_ms\|/{print $2}' | tr -d '[:space:]')
+      nullclaw_query2_ms=$(printf '%s\n' "$nullclaw_probe" | awk -F'|' '/^math_elapsed_ms\|/{print $2}' | tr -d '[:space:]')
+      [[ "$nullclaw_query1_ms" =~ ^[0-9]+$ ]] || fail "NullClaw query #1 timing missing from probe output"
+      [[ "$nullclaw_query2_ms" =~ ^[0-9]+$ ]] || fail "NullClaw query #2 timing missing from probe output"
+      log "NullClaw query #1 completed in ${nullclaw_query1_ms}ms"
+      log "NullClaw query #2 completed in ${nullclaw_query2_ms}ms"
+
+      record_flavor_query_timing "$flavor" "$nullclaw_query1_ms" "$nullclaw_query2_ms"
+
+      pass "NullClaw health + simple query checks passed"
       ;;
     *)
       fail "Unknown flavor from profile: $flavor"

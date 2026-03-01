@@ -1,6 +1,6 @@
 # OpenClaw Raspberry Pi 5 GenAI Kit Installer
 
-Automated installer for local AI assistants on Raspberry Pi 5 + Hailo-10H (AI HAT+ 2), with selectable flavor: OpenClaw, PicoClaw, ZeroClaw, Nanobot, or Moltis.
+Automated installer for local AI assistants on Raspberry Pi 5 + Hailo-10H (AI HAT+ 2), with selectable flavor: OpenClaw, PicoClaw, ZeroClaw, Nanobot, Moltis, IronClaw, or NullClaw.
 
 ## Quick navigation
 
@@ -25,7 +25,7 @@ This project installs and configures a local assistant stack on Raspberry Pi:
 
 1. System/runtime dependencies (Node, Docker, etc.)
 2. Hailo GenAI stack (`hailo-ollama`) and optional sanitizing proxy
-3. Selected assistant flavor (`openclaw`, `picoclaw`, `zeroclaw`, `nanobot`, or `moltis`)
+3. Selected assistant flavor (`openclaw`, `picoclaw`, `zeroclaw`, `nanobot`, `moltis`, `ironclaw`, or `nullclaw`)
 4. Optional OpenClaw-only extras (molt_tools, channel setup, RAG)
 5. Validation and SSH test scripts
 
@@ -39,6 +39,7 @@ For the main entrypoint see [`install-openclaw-rpi5.sh`](./install-openclaw-rpi5
 - **`nanobot`**: Nanobot install + local Hailo OpenAI-compatible wiring.
 - **`moltis`**: Moltis install + local Hailo OpenAI-compatible wiring.
 - **`ironclaw`**: IronClaw install/build + local Hailo OpenAI-compatible wiring.
+- **`nullclaw`**: NullClaw install/build (Zig) + local Hailo OpenAI-compatible wiring.
 
 Set via environment:
 
@@ -49,6 +50,7 @@ CLAW_FLAVOR=zeroclaw ./install-openclaw-rpi5.sh
 CLAW_FLAVOR=nanobot ./install-openclaw-rpi5.sh
 CLAW_FLAVOR=moltis ./install-openclaw-rpi5.sh
 CLAW_FLAVOR=ironclaw ./install-openclaw-rpi5.sh
+CLAW_FLAVOR=nullclaw ./install-openclaw-rpi5.sh
 ```
 
 If omitted, installer prompts interactively.
@@ -118,7 +120,7 @@ See source for exact behavior: [`install-openclaw-rpi5.sh`](./install-openclaw-r
 
 - **Phase 1**: system preparation (packages, Node, Docker)
 - **Phase 2**: Hailo setup + `hailo-ollama` + optional `hailo-sanitize-proxy`
-- **Phase 3**: selected flavor install (`openclaw` / `picoclaw` / `zeroclaw` / `nanobot` / `moltis`)
+- **Phase 3**: selected flavor install (`openclaw` / `picoclaw` / `zeroclaw` / `nanobot` / `moltis` / `ironclaw` / `nullclaw`)
 - **Phase 9**: verification
 
 ### OpenClaw-only phases
@@ -158,7 +160,7 @@ See [`./.env.example`](./.env.example) for complete examples.
 
 Key flags:
 
-- `CLAW_FLAVOR` (`openclaw|picoclaw|zeroclaw|nanobot|moltis`)
+- `CLAW_FLAVOR` (`openclaw|picoclaw|zeroclaw|nanobot|moltis|ironclaw|nullclaw`)
 - `USE_SANITIZER_PROXY_ON_OLLAMA`
 - `USE_OPENCLAW_TOOLS` (OpenClaw-specific)
 - `HAILO_MODEL`
@@ -187,7 +189,7 @@ bash scripts/test_tools_over_ssh.sh
 ```
 
 ### Adaptive cross-flavor/facade/proxy checks
-
+ 
 ```bash
 SSH_HOST=raspberrypi SSH_USER=sanchobot scripts/test_claw_flavors_over_ssh.sh
 
@@ -207,8 +209,22 @@ This validates:
 - proxy OpenAI model discovery compatibility (`/v1/models`)
 - per-flavor minimal config preload (writes local-Hailo defaults before checks)
 - per-flavor minimal config artifact validation (`config.json` / `config.toml` / `.env` as applicable)
-- exhaustive flavor matrix via `RUN_ALL_FLAVORS=true` (`picoclaw`, `zeroclaw`, `nanobot`, `moltis`, `ironclaw`, `openclaw`)
-- per-flavor simple-query latency capture with end-of-run comparison table (`Query #1`, `Query #2`, `Total`, in seconds)
+- exhaustive flavor matrix via `RUN_ALL_FLAVORS=true` (`picoclaw`, `zeroclaw`, `nanobot`, `moltis`, `ironclaw`, `nullclaw`, `openclaw`)
+- per-flavor simple-query + skill-stage timing with end-of-run comparison table (`OK`, `Math`, `Skill`, `Total`, in milliseconds); when `RUN_ALL_FLAVORS=true`, rows are sorted by `Total` fastest to slowest
+
+Latest `RUN_ALL_FLAVORS=true` timing snapshot:
+
+| Flavor   | OK (ms) | Math (ms) | Skill (ms) | Total (ms) |
+|----------|--------:|----------:|-----------:|-----------:|
+| ironclaw |    1400 |      1382 |       6466 |       9248 |
+| moltis   |    1400 |      1380 |       6652 |       9432 |
+| picoclaw |    1404 |      1381 |       6824 |       9609 |
+| nullclaw |    1396 |      1380 |      10384 |      13160 |
+| zeroclaw |    2701 |      3272 |      10936 |      16909 |
+| nanobot  |   11775 |     22014 |      31250 |      65039 |
+| openclaw |   24324 |     24400 |      32651 |      81375 |
+
+Date: 2026-03-01 (using qwen2:1.5b via hailo-ollama)
 
 ## Troubleshooting
 

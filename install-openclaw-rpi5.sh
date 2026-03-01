@@ -103,7 +103,7 @@ normalize_claw_flavor() {
     local raw="${1:-openclaw}"
     raw=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')
     case "$raw" in
-        openclaw|picoclaw|zeroclaw|nanobot|moltis|ironclaw)
+        openclaw|picoclaw|zeroclaw|nanobot|moltis|ironclaw|nullclaw)
             printf '%s' "$raw"
             ;;
         *)
@@ -122,6 +122,7 @@ prompt_claw_flavor() {
     echo "  4) Nanobot (Python)"
     echo "  5) Moltis (Rust)"
     echo "  6) IronClaw (Rust)"
+    echo "  7) NullClaw (Zig)"
     echo ""
     local default_choice="1"
     case "$CLAW_FLAVOR" in
@@ -130,6 +131,7 @@ prompt_claw_flavor() {
         nanobot) default_choice="4" ;;
         moltis) default_choice="5" ;;
         ironclaw) default_choice="6" ;;
+        nullclaw) default_choice="7" ;;
     esac
 
     local choice
@@ -140,6 +142,7 @@ prompt_claw_flavor() {
         4) CLAW_FLAVOR="nanobot" ;;
         5) CLAW_FLAVOR="moltis" ;;
         6) CLAW_FLAVOR="ironclaw" ;;
+        7) CLAW_FLAVOR="nullclaw" ;;
         *) CLAW_FLAVOR="openclaw" ;;
     esac
     print_step "Selected assistant flavor: $CLAW_FLAVOR"
@@ -232,6 +235,21 @@ EOF
     "id": "ironclaw-local",
     "title": "IronClaw Local",
     "subtitle": "IronClaw + local Hailo model",
+    "kind": "http-chat",
+    "endpoint": "$ollama_chat_url",
+    "model": "$HAILO_MODEL"
+  }
+]
+EOF
+)
+    elif [[ "$CLAW_FLAVOR" == "nullclaw" ]]; then
+        active_mode="nullclaw-local"
+        extra_mode_json=$(cat <<EOF
+[
+  {
+    "id": "nullclaw-local",
+    "title": "NullClaw Local",
+    "subtitle": "NullClaw + local Hailo model",
     "kind": "http-chat",
     "endpoint": "$ollama_chat_url",
     "model": "$HAILO_MODEL"
@@ -1533,6 +1551,83 @@ EOF
     write_unified_facade_runtime_profile
 }
 
+phase3_nullclaw_install() {
+    print_header "Phase 3: NullClaw Installation"
+
+    local model_base_url
+    model_base_url="$(get_hailo_openai_base_url)"
+
+    print_step "Installing build dependencies for NullClaw..."
+    sudo apt update
+    sudo apt install -y curl tar xz-utils git
+
+    local zig_version="0.15.2"
+    local zig_platform="aarch64-linux"
+    local zig_root="$HOME/.local/zig"
+    local zig_dir="$zig_root/zig-${zig_platform}-${zig_version}"
+    local zig_bin="$HOME/.local/bin/zig"
+
+    mkdir -p "$zig_root" "$HOME/.local/bin"
+
+    if [[ ! -x "$zig_bin" ]] || [[ "$("$zig_bin" version 2>/dev/null || true)" != "$zig_version" ]]; then
+        print_step "Installing Zig ${zig_version} (required by NullClaw)..."
+        local zig_tar="zig-${zig_platform}-${zig_version}.tar.xz"
+        curl -fsSL "https://ziglang.org/download/${zig_version}/${zig_tar}" -o "$zig_root/$zig_tar"
+        rm -rf "$zig_dir"
+        tar -xJf "$zig_root/$zig_tar" -C "$zig_root"
+        ln -sf "$zig_dir/zig" "$zig_bin"
+    fi
+
+    local nullclaw_dir="$HOME/.nullclaw-src"
+    if [[ -d "$nullclaw_dir/.git" ]]; then
+        git -C "$nullclaw_dir" pull --ff-only
+    else
+        git clone https://github.com/nullclaw/nullclaw.git "$nullclaw_dir"
+    fi
+
+    print_step "Building NullClaw (ReleaseSmall)..."
+    (
+        cd "$nullclaw_dir"
+        PATH="$HOME/.local/bin:$PATH" "$zig_bin" build -Doptimize=ReleaseSmall
+    )
+
+    mkdir -p "$HOME/.local/bin"
+    if [[ -x "$nullclaw_dir/zig-out/bin/nullclaw" ]]; then
+        install -m 0755 "$nullclaw_dir/zig-out/bin/nullclaw" "$HOME/.local/bin/nullclaw"
+    else
+        print_error "NullClaw binary not found at $nullclaw_dir/zig-out/bin/nullclaw after build"
+        return 1
+    fi
+
+    mkdir -p "$HOME/.nullclaw/workspace"
+    cat > "$HOME/.nullclaw/config.json" << EOF
+{
+  "default_temperature": 0.7,
+  "models": {
+    "providers": {
+      "ollama": {
+        "api_key": "hailo-local",
+        "base_url": "$model_base_url",
+        "api": "openai-completions"
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "workspace": "~/.nullclaw/workspace",
+      "restrict_to_workspace": true,
+      "model": {
+        "primary": "ollama/$HAILO_MODEL"
+      }
+    }
+  }
+}
+EOF
+
+    print_step "NullClaw installed and local Hailo defaults written to ~/.nullclaw/config.json (endpoint=$model_base_url)"
+    write_unified_facade_runtime_profile
+}
+
 phase3_install_selected_claw() {
     CLAW_FLAVOR=$(normalize_claw_flavor "$CLAW_FLAVOR")
     case "$CLAW_FLAVOR" in
@@ -1550,6 +1645,9 @@ phase3_install_selected_claw() {
             ;;
         ironclaw)
             phase3_ironclaw_install
+            ;;
+        nullclaw)
+            phase3_nullclaw_install
             ;;
         *)
             phase3_openclaw_install
@@ -2022,6 +2120,13 @@ phase9_verify_selected_claw() {
             fi
             print_step "IronClaw binary verification complete"
             ;;
+        nullclaw)
+            print_header "Phase 9: Verification (NullClaw)"
+            if command -v "$HOME/.local/bin/nullclaw" >/dev/null 2>&1; then
+                "$HOME/.local/bin/nullclaw" --help >/dev/null 2>&1 || true
+            fi
+            print_step "NullClaw binary verification complete"
+            ;;
     esac
 }
 
@@ -2047,7 +2152,7 @@ main() {
     echo "  - Node.js 22+ (via n version manager)"
     echo "  - Docker (Trixie-specific)"
     echo "  - Hailo GenAI stack with qwen2:1.5b"
-    echo "  - Selected claw flavor (OpenClaw/PicoClaw/ZeroClaw/Nanobot/Moltis/IronClaw) with local Hailo model wiring"
+    echo "  - Selected claw flavor (OpenClaw/PicoClaw/ZeroClaw/Nanobot/Moltis/IronClaw/NullClaw) with local Hailo model wiring"
     echo "  - molt_tools skill for Moltbook integration"
     echo "  - First boot task: post to Moltbook"
     echo ""
@@ -2110,6 +2215,10 @@ main() {
         echo "To start Nanobot:"
         echo "  ~/.local/bin/nanobot gateway"
         echo "  ~/.local/bin/nanobot agent"
+    elif [[ "$CLAW_FLAVOR" == "nullclaw" ]]; then
+        echo "To start NullClaw:"
+        echo "  ~/.local/bin/nullclaw gateway"
+        echo "  ~/.local/bin/nullclaw agent -m \"Hello\""
     elif [[ "$CLAW_FLAVOR" == "ironclaw" ]]; then
         echo "To start IronClaw:"
         echo "  ~/.local/bin/ironclaw"
