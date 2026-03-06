@@ -15,6 +15,7 @@ Automated installer for local AI assistants on Raspberry Pi 5 + Hailo-10H (AI HA
 - [Configuration flags (`.env.example`)](#configuration-flags-envexample)
 - [Unified chat facade](#unified-chat-facade)
 - [Testing](#testing)
+- [Qwen3.5 script quick guide](#qwen35-script-quick-guide)
 - [Troubleshooting](#troubleshooting)
 - [Project layout](#project-layout)
 - [License](#license)
@@ -225,6 +226,12 @@ Latest `RUN_ALL_FLAVORS=true` timing snapshot:
 | openclaw |   24324 |     24400 |      32651 |      81375 |
 
 Date: 2026-03-01 (using qwen2:1.5b via hailo-ollama)
+
+## Qwen3.5 script quick guide
+
+For ONNX export and Hailo HEF compile helper usage:
+
+- [`scripts/README.md`](./scripts/README.md)
 
 ## Troubleshooting
 
