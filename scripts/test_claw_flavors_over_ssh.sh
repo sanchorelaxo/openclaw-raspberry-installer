@@ -10,6 +10,8 @@ FACADE_REL=${FACADE_REL:-templates/unified-chat-facade.html}
 RUN_ALL_FLAVORS=${RUN_ALL_FLAVORS:-false}
 TEST_HAILO_MODEL=${TEST_HAILO_MODEL:-qwen2:1.5b}
 FLAVORS_TO_TEST=${FLAVORS_TO_TEST:-picoclaw zeroclaw nanobot moltis ironclaw nullclaw openclaw}
+REQUIRE_AI_CAMERA_VISIBLE=${REQUIRE_AI_CAMERA_VISIBLE:-false}
+REQUIRE_HAILO_APPS_INFRA=${REQUIRE_HAILO_APPS_INFRA:-false}
 
 SSH_CMD=(ssh -o ConnectTimeout=10 -p "$SSH_PORT" "${SSH_USER}@${SSH_HOST}")
 
@@ -25,6 +27,7 @@ declare -A QUERY_TIMING_QUERY3_MS=()
 declare -A QUERY_TIMING_TOTAL_MS=()
 
 TIMED_LAST_MS=0
+HAILO_CAMERA_APPS_CHECK_DONE=false
 
 run_timed_remote_command() {
   local __output_var="$1"
@@ -121,6 +124,17 @@ print_query_timing_table() {
 
 run_ssh() {
   "${SSH_CMD[@]}" "$@"
+}
+
+is_truthy() {
+  case "${1,,}" in
+    1|true|yes|y|on)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 require_remote_file() {
@@ -590,7 +604,106 @@ EOF"
   preload_hailo_apps_health_check_skill "$flavor"
 }
 
+check_hailo10h_camera_and_hailo_apps_once() {
+  if [[ "$HAILO_CAMERA_APPS_CHECK_DONE" == "true" ]]; then
+    return
+  fi
+  HAILO_CAMERA_APPS_CHECK_DONE=true
+
+  log "Running Hailo-10H + AI camera + hailo-apps sanity checks (run-once)"
+
+  run_ssh 'command -v hailortcli >/dev/null 2>&1' || fail "hailortcli is missing on remote Pi"
+  run_ssh 'test -e /dev/hailo0' || fail "Remote /dev/hailo0 is missing"
+
+  if run_ssh "dpkg -l | grep -q '^ii  hailo-h10-all'"; then
+    log "Hailo package check: found hailo-h10-all"
+  elif run_ssh "dpkg -l | grep -q '^ii  h10-hailort'" && run_ssh "dpkg -l | grep -q '^ii  h10-hailort-pcie-driver'"; then
+    log "Hailo package check: found split Hailo-10H packages (h10-hailort + h10-hailort-pcie-driver)"
+  else
+    fail "Expected Hailo-10H packages: hailo-h10-all OR (h10-hailort + h10-hailort-pcie-driver)"
+  fi
+
+  if run_ssh "dpkg -l | grep -q '^ii  hailo-all'"; then
+    warn "hailo-all is installed; for Hailo-10H stacks, hailo-h10-all is recommended"
+  fi
+
+  run_ssh 'hailortcli fw-control identify >/tmp/hailort_identify.out 2>&1' || fail "hailortcli fw-control identify failed"
+  local hailort_identify
+  hailort_identify=$(run_ssh 'tail -n 40 /tmp/hailort_identify.out || true')
+  [[ -n "$hailort_identify" ]] && log "$hailort_identify"
+
+  local camera_probe camera_visible camera_probe_tools
+  camera_probe=$(run_ssh "python3 - <<'PY'
+import glob
+import re
+import shutil
+import subprocess
+
+visible = False
+tools_found = 0
+
+for cmd in (('rpicam-hello', '--list-cameras'), ('libcamera-hello', '--list-cameras'), ('libcamera-vid', '--list-cameras')):
+    if shutil.which(cmd[0]):
+        tools_found += 1
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        output = (proc.stdout or '').strip()
+        print('camera_cmd|' + ' '.join(cmd) + '|rc=' + str(proc.returncode))
+        if output:
+            for line in output.splitlines()[:20]:
+                print('camera_cmd_out|' + line)
+        if re.search(r'available cameras', output, flags=re.IGNORECASE) or re.search(r'^\\s*\\d+\\s*:', output, flags=re.MULTILINE):
+            visible = True
+
+video_nodes = sorted(glob.glob('/dev/video*'))
+if video_nodes:
+    visible = True
+
+print('camera_video_nodes|' + (','.join(video_nodes) if video_nodes else 'none'))
+print('camera_probe_tools|' + ('present' if tools_found else 'none'))
+print('camera_visible|' + ('yes' if visible else 'no'))
+PY") || fail "AI camera visibility probe failed"
+  log "$camera_probe"
+
+  camera_visible=$(printf '%s\n' "$camera_probe" | awk -F'|' '/^camera_visible\|/{print $2}' | tail -n 1 | tr -d '[:space:]')
+  camera_probe_tools=$(printf '%s\n' "$camera_probe" | awk -F'|' '/^camera_probe_tools\|/{print $2}' | tail -n 1 | tr -d '[:space:]')
+
+  if [[ "$camera_visible" == "yes" ]]; then
+    pass "AI camera visibility check passed"
+  elif is_truthy "$REQUIRE_AI_CAMERA_VISIBLE"; then
+    fail "AI camera not visible on remote Pi (set REQUIRE_AI_CAMERA_VISIBLE=false to downgrade to warning)"
+  else
+    warn "AI camera not visible on remote Pi (set REQUIRE_AI_CAMERA_VISIBLE=true to enforce failure)"
+  fi
+
+  if [[ "$camera_probe_tools" == "none" ]]; then
+    warn "No rpicam/libcamera camera listing tool found; visibility inference relied on /dev/video* nodes"
+  fi
+
+  local hailo_apps_setup="/home/${SSH_USER}/hailo-apps-infra/setup_env.sh"
+  if run_ssh "test -f '$hailo_apps_setup'"; then
+    run_ssh "bash -lc 'set -e; cd ~/hailo-apps-infra; source ./setup_env.sh >/dev/null 2>&1; command -v hailo-detect >/dev/null 2>&1'" || fail "hailo-apps CLI missing: hailo-detect"
+    run_ssh "bash -lc 'set -e; cd ~/hailo-apps-infra; source ./setup_env.sh >/dev/null 2>&1; command -v hailo-detect-simple >/dev/null 2>&1'" || fail "hailo-apps CLI missing: hailo-detect-simple"
+    run_ssh "bash -lc 'set -e; cd ~/hailo-apps-infra; source ./setup_env.sh >/dev/null 2>&1; command -v hailo-pose >/dev/null 2>&1'" || fail "hailo-apps CLI missing: hailo-pose"
+    run_ssh "bash -lc 'set -e; cd ~/hailo-apps-infra; source ./setup_env.sh >/dev/null 2>&1; command -v hailo-seg >/dev/null 2>&1'" || fail "hailo-apps CLI missing: hailo-seg"
+    run_ssh "bash -lc 'set -e; cd ~/hailo-apps-infra; source ./setup_env.sh >/dev/null 2>&1; command -v hailo-depth >/dev/null 2>&1'" || fail "hailo-apps CLI missing: hailo-depth"
+    run_ssh "bash -lc 'set -e; cd ~/hailo-apps-infra; source ./setup_env.sh >/dev/null 2>&1; command -v hailo-multisource >/dev/null 2>&1'" || fail "hailo-apps CLI missing: hailo-multisource"
+    run_ssh "bash -lc 'set -e; cd ~/hailo-apps-infra; source ./setup_env.sh >/dev/null 2>&1; hailo-detect --help >/tmp/hailo_detect_help.out 2>&1'" || fail "hailo-detect --help failed"
+    run_ssh "bash -lc 'set -e; cd ~/hailo-apps-infra; source ./setup_env.sh >/dev/null 2>&1; hailo-multisource --help >/tmp/hailo_multisource_help.out 2>&1'" || fail "hailo-multisource --help failed"
+    pass "hailo-apps CLI smoke checks passed"
+  elif is_truthy "$REQUIRE_HAILO_APPS_INFRA"; then
+    fail "hailo-apps-infra is missing at ~/hailo-apps-infra (set REQUIRE_HAILO_APPS_INFRA=false to downgrade to warning)"
+  else
+    warn "hailo-apps-infra not found at ~/hailo-apps-infra; skipping hailo-apps CLI smoke checks"
+  fi
+
+  # The hailo-camera-apps repository is currently Hailo-15 focused.
+  # For Raspberry Pi 5 + Hailo-10H, keep tests anchored on hailo-apps-infra/Hailo-Apps commands.
+  log "Reference note: hailo-camera-apps targets Hailo-15; these SSH checks stay aligned to Hailo-10H-compatible hailo-apps flows"
+}
+
 run_checks_for_current_profile_flavor() {
+  log "-- check_hailo10h_camera_and_hailo_apps_once"
+  check_hailo10h_camera_and_hailo_apps_once
   log "-- check_profile_shape"
   check_profile_shape
   log "-- check_flavor_binary_and_mode_alignment"

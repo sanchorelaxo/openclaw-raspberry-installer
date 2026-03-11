@@ -199,6 +199,9 @@ RUN_ALL_FLAVORS=true SSH_HOST=raspberrypi SSH_USER=sanchobot scripts/test_claw_f
 
 # Iterate quickly on a subset of flavors
 RUN_ALL_FLAVORS=true FLAVORS_TO_TEST="picoclaw zeroclaw" SSH_HOST=raspberrypi SSH_USER=sanchobot scripts/test_claw_flavors_over_ssh.sh
+
+# Enforce strict hardware/app visibility gates (fail instead of warn)
+REQUIRE_AI_CAMERA_VISIBLE=true REQUIRE_HAILO_APPS_INFRA=true SSH_HOST=raspberrypi SSH_USER=sanchobot scripts/test_claw_flavors_over_ssh.sh
 ```
 
 This validates:
@@ -208,10 +211,18 @@ This validates:
 - facade intermediary HTTP-chat path (`runtime profile -> facade mode -> proxy -> hailo-ollama`)
 - direct-vs-proxy compatibility matrix for Hailo endpoints
 - proxy OpenAI model discovery compatibility (`/v1/models`)
+- run-once Hailo-10H platform sanity gate (`/dev/hailo0`, `hailortcli`, `hailo-h10-all`)
+- AI camera visibility probe via `rpicam/libcamera --list-cameras` and `/dev/video*` detection
+- optional hailo-apps CLI smoke checks (`hailo-detect`, `hailo-detect-simple`, `hailo-pose`, `hailo-seg`, `hailo-depth`, `hailo-multisource`)
 - per-flavor minimal config preload (writes local-Hailo defaults before checks)
 - per-flavor minimal config artifact validation (`config.json` / `config.toml` / `.env` as applicable)
 - exhaustive flavor matrix via `RUN_ALL_FLAVORS=true` (`picoclaw`, `zeroclaw`, `nanobot`, `moltis`, `ironclaw`, `nullclaw`, `openclaw`)
 - per-flavor simple-query + skill-stage timing with end-of-run comparison table (`OK`, `Math`, `Skill`, `Total`, in milliseconds); when `RUN_ALL_FLAVORS=true`, rows are sorted by `Total` fastest to slowest
+
+Strictness controls:
+
+- `REQUIRE_AI_CAMERA_VISIBLE=true` to fail when no camera is detected (default: warning only)
+- `REQUIRE_HAILO_APPS_INFRA=true` to fail when `~/hailo-apps-infra` is absent (default: warning only)
 
 Latest `RUN_ALL_FLAVORS=true` timing snapshot:
 
