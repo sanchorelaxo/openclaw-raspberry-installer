@@ -7,9 +7,10 @@ set -e
 # OS: Raspberry Pi OS Trixie (Debian 13)
 #
 # Usage:
-#   ./install-openclaw-rpi5.sh              # Online install (requires internet)
-#   ./install-openclaw-rpi5.sh --offline    # Offline install (uses bundled deps)
-#   ./install-openclaw-rpi5.sh --prepare-offline  # Download deps for offline use
+#   ./install-openclaw-rpi5.sh                  # Online install (requires internet)
+#   ./install-openclaw-rpi5.sh --offline        # Offline install (uses bundled deps)
+#   ./install-openclaw-rpi5.sh --prepare-offline # Download deps for offline use
+#   ./install-openclaw-rpi5.sh --non-interactive # Use defaults, no prompts
 #===============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,9 +19,15 @@ OPENCLAW_CONFIG="$HOME/.openclaw/openclaw.json"
 MOLTBOOK_CONFIG_DIR="$HOME/.config/moltbook"
 OFFLINE_DIR="$SCRIPT_DIR/offline_bundle"
 
+# Keep repeated CLI runs snappy on small hosts and avoid respawn churn.
+export NODE_COMPILE_CACHE="${NODE_COMPILE_CACHE:-/var/tmp/openclaw-compile-cache}"
+mkdir -p "$NODE_COMPILE_CACHE"
+export OPENCLAW_NO_RESPAWN="${OPENCLAW_NO_RESPAWN:-1}"
+
 # Parse arguments
 OFFLINE_MODE=false
 PREPARE_OFFLINE=false
+NON_INTERACTIVE=${NON_INTERACTIVE:-false}
 USE_SANITIZER_PROXY_ON_OLLAMA=${USE_SANITIZER_PROXY_ON_OLLAMA:-true}
 USE_OPENCLAW_TOOLS=${USE_OPENCLAW_TOOLS:-true}
 CLAW_FLAVOR=${CLAW_FLAVOR:-openclaw}
@@ -36,9 +43,13 @@ while [[ $# -gt 0 ]]; do
             PREPARE_OFFLINE=true
             shift
             ;;
+        --non-interactive)
+            NON_INTERACTIVE=true
+            shift
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--offline | --prepare-offline]"
+            echo "Usage: $0 [--offline | --prepare-offline | --non-interactive]"
             exit 1
             ;;
     esac
@@ -73,7 +84,12 @@ prompt_yes_no() {
     local prompt="$1"
     local default="${2:-n}"
     local response
-    
+
+    if [[ "$NON_INTERACTIVE" == "true" || ! -t 0 ]]; then
+        [[ "$default" =~ ^[Yy]$ ]]
+        return
+    fi
+
     if [[ "$default" == "y" ]]; then
         read -p "$prompt [Y/n]: " response
         response=${response:-y}
@@ -89,7 +105,12 @@ prompt_input() {
     local prompt="$1"
     local default="$2"
     local response
-    
+
+    if [[ "$NON_INTERACTIVE" == "true" || ! -t 0 ]]; then
+        echo "$default"
+        return
+    fi
+
     if [[ -n "$default" ]]; then
         read -p "$prompt [$default]: " response
         echo "${response:-$default}"
@@ -97,6 +118,25 @@ prompt_input() {
         read -p "$prompt: " response
         echo "$response"
     fi
+}
+
+escape_sed_replacement() {
+    printf '%s' "$1" | sed -e 's/[\/&\\]/\\&/g'
+}
+
+ensure_sudo_ready() {
+    if sudo -n true 2>/dev/null; then
+        return
+    fi
+
+    if [[ "$NON_INTERACTIVE" == "true" || ! -t 0 ]]; then
+        print_error "sudo credentials are required, but non-interactive mode cannot prompt for password."
+        print_warn "Run 'sudo -v' once before starting installer, or configure passwordless sudo."
+        exit 1
+    fi
+
+    print_step "Requesting sudo credentials..."
+    sudo -v
 }
 
 normalize_claw_flavor() {
@@ -1110,11 +1150,10 @@ phase3_openclaw_install() {
         print_step "OpenClaw already installed"
     fi
     
-    # Run onboarding (non-interactive parts)
-    print_step "Running OpenClaw onboarding..."
-    openclaw onboard --install-daemon || {
-        print_warn "Onboarding may require manual completion"
-    }
+    # OpenClaw onboarding is interactive in current releases and blocks automation.
+    # The installer writes the needed config and auth files below, so defer doctor
+    # until verification after the configuration is in place.
+    print_step "Skipping early OpenClaw doctor; configuration will be written next"
     
     # Fix: remove duplicate nextcloud-talk extension from user-space if it exists.
     # OpenClaw bundles nextcloud-talk in its npm-global extensions dir; a second
@@ -1145,9 +1184,10 @@ phase3_openclaw_install() {
     sed -i '/OLLAMA_API_KEY/d' "$HOME/.openclaw/.env" 2>/dev/null || true
     unset OLLAMA_API_KEY 2>/dev/null || true
     
-    # Convert model name for ollama provider format (e.g., qwen2:1.5b -> ollama/qwen2:1.5b)
-    # If USE_SANITIZER_PROXY_ON_OLLAMA=true, we route through the proxy on port 8081.
-    HAILO_PROVIDER_MODEL="ollama/${HAILO_MODEL:-qwen2:1.5b}"
+    # Use a dedicated custom provider id ("hailo") to avoid Ollama-native probes
+    # like /api/show that can fail on hailo-ollama.
+    HAILO_PROVIDER_ID="hailo"
+    HAILO_PROVIDER_MODEL="${HAILO_PROVIDER_ID}/${HAILO_MODEL:-qwen2:1.5b}"
     MODEL_ID="${HAILO_MODEL:-qwen2:1.5b}"
     MODEL_BASE_URL="$(get_hailo_openai_base_url)"
     if [[ "$USE_SANITIZER_PROXY_ON_OLLAMA" != "true" ]]; then
@@ -1170,11 +1210,14 @@ phase3_openclaw_install() {
     cat > "$OPENCLAW_CONFIG" << EOF
 {
   "gateway": {
-    "mode": "local"
+    "mode": "local",
+    "auth": {
+      "mode": "none"
+    }
   },
   "models": {
     "providers": {
-      "ollama": {
+      "$HAILO_PROVIDER_ID": {
         "baseUrl": "$MODEL_BASE_URL",
         "apiKey": "hailo-local",
         "api": "openai-completions",
@@ -1202,23 +1245,37 @@ phase3_openclaw_install() {
           "streaming": false
         }
       },
+      "contextInjection": "continuation-skip",
       "sandbox": {
-        "mode": "workspace",
-        "rootPath": "~/.openclaw/workspace"
+        "mode": "off",
+        "workspaceAccess": "rw"
       },
       "heartbeat": {
         "every": "4h",
         "activeHours": { "start": "07:00", "end": "18:00" },
         "target": "last"
+      },
+      "bootstrapMaxChars": 6000,
+      "bootstrapTotalMaxChars": 12000,
+      "compaction": {
+        "reserveTokens": 2048,
+        "reserveTokensFloor": 3000
       }
     }
   },
   $TOOLS_BLOCK
   "plugins": {
-    "allow": ["nextcloud-talk"]
+    "allow": ["nextcloud-talk"],
+    "bundledDiscovery": "compat"
   }
 }
 EOF
+
+    if ! openclaw config validate >/dev/null 2>&1; then
+        print_error "Generated OpenClaw config failed validation"
+        openclaw config validate || true
+        exit 1
+    fi
     
     if [[ "$USE_SANITIZER_PROXY_ON_OLLAMA" == "true" ]]; then
         print_step "OpenClaw configured with Hailo-Ollama via sanitizing proxy"
@@ -1227,23 +1284,30 @@ EOF
     fi
     print_step "Primary model: $HAILO_PROVIDER_MODEL (cost: \$0)"
     
-    # Write auth profile so the agent can use the Ollama provider.
-    # OpenClaw requires a credential entry in auth-profiles.json even for local
-    # providers that don't need real auth (known issue: openclaw/openclaw#3740).
-    print_step "Writing Ollama auth profile for main agent..."
+    # Write auth profile so the agent can use the local provider credentials.
+    print_step "Writing local provider auth profile for main agent..."
     mkdir -p "$HOME/.openclaw/agents/main/agent"
-    cat > "$HOME/.openclaw/agents/main/agent/auth-profiles.json" << 'EOF'
+    cat > "$HOME/.openclaw/agents/main/agent/auth-profiles.json" << EOF
 {
-  "ollama:local": {
+  "$HAILO_PROVIDER_ID:local": {
     "type": "token",
-    "provider": "ollama",
+    "provider": "$HAILO_PROVIDER_ID",
     "token": "hailo-local"
   },
   "lastGood": {
-    "ollama": "ollama:local"
+    "$HAILO_PROVIDER_ID": "$HAILO_PROVIDER_ID:local"
   }
 }
 EOF
+
+    # Persist low-power startup optimizations for future shells.
+    sed -i '/OPENCLAW_GATEWAY_TOKEN/d' "$HOME/.bashrc" 2>/dev/null || true
+    mkdir -p "$HOME/.openclaw"
+    cat > "$HOME/.openclaw/.env" << EOF
+NODE_COMPILE_CACHE=$NODE_COMPILE_CACHE
+OPENCLAW_NO_RESPAWN=$OPENCLAW_NO_RESPAWN
+EOF
+    chmod 600 "$HOME/.openclaw/.env"
     
     # Restart OpenClaw daemon so it picks up the new config.
     print_step "Restarting OpenClaw daemon with Hailo model config..."
@@ -1700,10 +1764,14 @@ phase4_deploy_config() {
     
     # Update AGENTS.md with customizations
     if [[ -f "$OPENCLAW_WORKSPACE/AGENTS.md" ]]; then
-        sed -i "s/{list names}/$PRIORITY_CONTACTS/g" "$OPENCLAW_WORKSPACE/AGENTS.md"
-        sed -i "s/{list projects}/$PRIORITY_PROJECTS/g" "$OPENCLAW_WORKSPACE/AGENTS.md"
+        local escaped_contacts escaped_projects escaped_deep_work
+        escaped_contacts=$(escape_sed_replacement "$PRIORITY_CONTACTS")
+        escaped_projects=$(escape_sed_replacement "$PRIORITY_PROJECTS")
+        escaped_deep_work=$(escape_sed_replacement "$DEEP_WORK")
+        sed -i "s/{list names}/$escaped_contacts/g" "$OPENCLAW_WORKSPACE/AGENTS.md"
+        sed -i "s/{list projects}/$escaped_projects/g" "$OPENCLAW_WORKSPACE/AGENTS.md"
         if [[ -n "$DEEP_WORK" ]]; then
-            sed -i "s/9am-12pm, 2pm-5pm (don't interrupt)/$DEEP_WORK (don't interrupt)/g" "$OPENCLAW_WORKSPACE/AGENTS.md"
+            sed -i "s/9am-12pm, 2pm-5pm (don't interrupt)/$escaped_deep_work (don't interrupt)/g" "$OPENCLAW_WORKSPACE/AGENTS.md"
         fi
         print_step "Customized AGENTS.md with your preferences"
     fi
@@ -2072,7 +2140,8 @@ phase9_verification() {
     print_header "Phase 9: Verification"
     
     print_step "Running OpenClaw diagnostics..."
-    openclaw doctor || true
+    openclaw doctor --repair --non-interactive --yes || true
+    openclaw doctor --lint --non-interactive || true
     openclaw status --all || true
     openclaw health || true
     
@@ -2167,6 +2236,7 @@ main() {
         exit 0
     fi
 
+    ensure_sudo_ready
     prompt_claw_flavor
     
     phase1_system_prep
@@ -2205,6 +2275,7 @@ main() {
         echo "  openclaw gateway --port 18789 --verbose"
         echo ""
         echo "Dashboard: http://localhost:18789/"
+        echo "Gateway auth: disabled (mode=none)"
     elif [[ "$CLAW_FLAVOR" == "picoclaw" ]]; then
         echo "To start PicoClaw:"
         echo "  ~/.local/bin/picoclaw gateway"

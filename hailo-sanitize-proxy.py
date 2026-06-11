@@ -26,7 +26,7 @@ import itertools
 import urllib.request
 import urllib.error
 
-LISTEN_PORT = 8081
+LISTEN_PORT = int(os.environ.get("HAILO_PROXY_PORT", "8081"))
 UPSTREAM = "http://127.0.0.1:8000"
 DEFAULT_MODEL_ID = os.environ.get("HAILO_MODEL", "qwen2:1.5b")
 WORKSPACE_SKILLS_DIR = os.path.expanduser("~/.openclaw/workspace/skills")
@@ -57,6 +57,11 @@ ALLOWED_HOSTS = {
     ).split(",")
     if item.strip()
 }
+ALLOWED_HOSTS.update({
+    f"127.0.0.1:{LISTEN_PORT}",
+    f"localhost:{LISTEN_PORT}",
+    f"[::1]:{LISTEN_PORT}",
+})
 
 
 def _env_int(name, default):
@@ -75,6 +80,7 @@ TRACE_ENABLED = os.environ.get("HAILO_PROXY_TRACE", "1").strip().lower() not in 
 TRACE_DIR = os.environ.get("HAILO_PROXY_TRACE_DIR", "/tmp/hailo-proxy-traces")
 TRACE_MAX_BYTES = _env_int("HAILO_PROXY_TRACE_MAX_BYTES", 250000)
 MAX_PROXY_COMPLETION_TOKENS = _env_int("HAILO_PROXY_MAX_TOKENS", 128)
+DEFAULT_PROXY_COMPLETION_TOKENS = _env_int("HAILO_PROXY_DEFAULT_TOKENS", 96)
 MAX_HISTORY_MESSAGES = _env_int("HAILO_PROXY_MAX_HISTORY_MESSAGES", 1)
 _TRACE_SEQ = itertools.count(1)
 
@@ -314,11 +320,19 @@ def sanitize_chat_body(body_bytes, tool_prompt_enabled=True):
     max_tokens = sanitized.get("max_tokens")
     max_completion_tokens = sanitized.get("max_completion_tokens")
     if isinstance(max_tokens, int) and max_tokens > 0:
-        sanitized["max_tokens"] = min(max_tokens, MAX_PROXY_COMPLETION_TOKENS)
+        requested_tokens = max_tokens
     elif isinstance(max_completion_tokens, int) and max_completion_tokens > 0:
-        sanitized["max_tokens"] = min(max_completion_tokens, MAX_PROXY_COMPLETION_TOKENS)
+        requested_tokens = max_completion_tokens
     else:
-        sanitized["max_tokens"] = MAX_PROXY_COMPLETION_TOKENS
+        requested_tokens = DEFAULT_PROXY_COMPLETION_TOKENS
+
+    # OpenClaw occasionally sends max_tokens=1 for local providers. On Hailo this
+    # hard-truncates every reply to a single token ("I", "ACT", ...). Promote this
+    # pathological value to a sensible default while still capping upper bounds.
+    if requested_tokens <= 1:
+        requested_tokens = DEFAULT_PROXY_COMPLETION_TOKENS
+
+    sanitized["max_tokens"] = min(requested_tokens, MAX_PROXY_COMPLETION_TOKENS)
     sanitized.pop("max_completion_tokens", None)
 
     if isinstance(sanitized.get("n"), int) and sanitized["n"] > 1:

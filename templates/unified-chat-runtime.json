@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "flavor": "openclaw",
+  "gatewayUrl": "ws://127.0.0.1:18789",
+  "ollamaUrl": "http://127.0.0.1:8081/v1/chat/completions",
+  "ollamaModel": "qwen2:1.5b",
+  "activeMode": "ollama",
+  "extraModes": []
+}
